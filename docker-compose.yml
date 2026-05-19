@@ -1,0 +1,306 @@
+services:
+  # ============================================
+  # Demo MySQL 8.0 - 电商业务源库 (演示/测试用)
+  # ============================================
+  demo-mysql:
+    image: mysql:8.0
+    container_name: dmp-demo-mysql
+    restart: always
+    env_file: .env
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: demo_ecommerce
+      MYSQL_CHARACTER_SET_SERVER: utf8mb4
+      MYSQL_COLLATION_SERVER: utf8mb4_unicode_ci
+    expose:
+      - "3306"
+    volumes:
+      - demo_mysql_data:/var/lib/mysql
+      - ./demo/init-mysql.sql:/docker-entrypoint-initdb.d/01-init.sql
+    command: >
+      --default-authentication-plugin=mysql_native_password
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --max-connections=100
+      --innodb-buffer-pool-size=128M
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    mem_limit: 512m
+    networks:
+      - dmp-net
+
+  # ============================================
+  # Demo PostgreSQL 15 - 数仓目标库 (演示/测试用)
+  # ============================================
+  demo-postgres:
+    image: postgres:15-alpine
+    container_name: dmp-demo-postgres
+    restart: always
+    env_file: .env
+    environment:
+      POSTGRES_USER: root
+      POSTGRES_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      POSTGRES_DB: demo_dw
+    expose:
+      - "5432"
+    volumes:
+      - demo_postgres_data:/var/lib/postgresql/data
+      - ./demo/init-postgres.sql:/docker-entrypoint-initdb.d/01-init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U root -d demo_dw || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    mem_limit: 256m
+    networks:
+      - dmp-net
+
+  # ============================================
+  # MySQL 8.0 - 元数据库 (不对外暴露端口)
+  # ============================================
+  mysql:
+    image: mysql:8.0
+    container_name: dmp-mysql
+    restart: always
+    env_file: .env
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: portal_db
+      MYSQL_CHARACTER_SET_SERVER: utf8mb4
+      MYSQL_COLLATION_SERVER: utf8mb4_unicode_ci
+    expose:
+      - "3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./docker/mysql/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+    command: >
+      --default-authentication-plugin=mysql_native_password
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --max-connections=200
+      --innodb-buffer-pool-size=256M
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    mem_limit: 1g
+    networks:
+      - dmp-net
+
+  # ============================================
+  # Redis - 缓存 (不对外暴露端口)
+  # ============================================
+  redis:
+    image: redis:7-alpine
+    container_name: dmp-redis
+    restart: always
+    expose:
+      - "6379"
+    command: redis-server --requirepass ${REDIS_PASSWORD} --maxmemory 256mb --maxmemory-policy allkeys-lru --appendonly yes --appendfsync everysec
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    mem_limit: 512m
+    networks:
+      - dmp-net
+
+  # ============================================
+  # DolphinScheduler - 调度中心 (不对外暴露端口)
+  # ============================================
+  dolphinscheduler:
+    image: apache/dolphinscheduler-standalone-server:3.2.2
+    container_name: dmp-ds
+    restart: always
+    env_file: .env
+    environment:
+      DATABASE: mysql
+      SPRING_PROFILES_ACTIVE: mysql
+      SPRING_DATASOURCE_DRIVER_CLASS_NAME: com.mysql.cj.jdbc.Driver
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/dolphinscheduler?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      SPRING_REDIS_HOST: redis
+      SPRING_REDIS_PORT: 6379
+      SPRING_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      TZ: Asia/Shanghai
+    expose:
+      - "12345"
+    volumes:
+      - ds_logs:/opt/dolphinscheduler/logs
+      - ./datax:/opt/datax
+      - ./drivers/mysql-connector-j-8.0.33.jar:/opt/dolphinscheduler/libs/standalone-server/mysql-connector-j-8.0.33.jar
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:12345/dolphinscheduler/actuator/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    mem_limit: 2g
+    networks:
+      - dmp-net
+
+  # ============================================
+  # Elasticsearch - 已停用（架构冻结后不再使用 OpenMetadata）
+  # ============================================
+  # elasticsearch:
+  #   image: docker.elastic.co/elasticsearch/elasticsearch:7.17.24
+  #   container_name: dmp-es
+  #   restart: always
+  #   environment:
+  #     - discovery.type=single-node
+  #     - xpack.security.enabled=false
+  #     - ES_JAVA_OPTS=-Xms512m -Xmx512m
+  #     - cluster.routing.allocation.disk.threshold_enabled=false
+  #   expose:
+  #     - "9200"
+  #   volumes:
+  #     - es_data:/usr/share/elasticsearch/data
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+  #     interval: 15s
+  #     timeout: 10s
+  #     retries: 10
+  #     start_period: 60s
+  #   mem_limit: 1g
+  #   networks:
+  #     - dmp-net
+
+  # ============================================
+  # OpenMetadata - 已停用（Portal 直连 information_schema 替代）
+  # ============================================
+  # openmetadata-server:
+  #   image: docker.1ms.run/openmetadata/server:latest
+  #   container_name: dmp-om
+  #   restart: always
+  #   env_file: .env
+  #   environment:
+  #     ELASTICSEARCH_HOST: elasticsearch
+  #     ELASTICSEARCH_PORT: 9200
+  #     DB_DRIVER_CLASS: com.mysql.cj.jdbc.Driver
+  #     DB_SCHEME: mysql
+  #     DB_HOST: mysql
+  #     DB_PORT: 3306
+  #     DB_USER: root
+  #     DB_USER_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+  #     OM_DATABASE: openmetadata
+  #     OPENMETADATA_CLUSTER_NAME: dmp-cluster
+  #     AUTHORIZER_CLASS_NAME: org.openmetadata.service.security.DefaultAuthorizer
+  #     AUTHORIZER_REQUEST_FILTER: org.openmetadata.service.security.JwtFilter
+  #     AUTHENTICATION_PROVIDER: basic
+  #     AUTHORIZER_ADMIN_PRINCIPALS: "[admin]"
+  #     LOGIN_AUTH_PROVIDER: basic
+  #     OM_AUTH_JWTRS_PUBLIC_KEY_PATH: "/openmetadata/conf/public_key.der"
+  #     OM_AUTH_JWTRS_PRIVATE_KEY_PATH: "/openmetadata/conf/private_key.der"
+  #     OM_SIGNING_KEY: "abc123abc123abc123abc123abc123abc123abc123abc123"
+  #     MIGRATION_LIMIT_PARAM: "1200"
+  #   expose:
+  #     - "8585"
+  #   volumes:
+  #     - om_data:/opt/openmetadata
+  #   depends_on:
+  #     elasticsearch:
+  #       condition: service_healthy
+  #     mysql:
+  #       condition: service_healthy
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "curl -sf http://localhost:8585/healthcheck || exit 1"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 15
+  #     start_period: 180s
+  #   mem_limit: 2g
+  #   networks:
+  #     - dmp-net
+
+  # ============================================
+  # Portal Backend - FastAPI (不对外暴露端口)
+  # ============================================
+  portal-backend:
+    build:
+      context: ./portal/backend
+      dockerfile: Dockerfile
+    container_name: dmp-portal-api
+    restart: always
+    env_file: .env
+    environment:
+      DATABASE_URL: mysql+pymysql://root:${MYSQL_ROOT_PASSWORD}@mysql:3306/portal_db
+      SECRET_KEY: ${PORTAL_SECRET_KEY}
+      DS_API_URL: http://dolphinscheduler:12345/dolphinscheduler
+      OM_API_URL: http://openmetadata-server:8585
+      DATAX_HOME: /opt/datax
+      DATAX_JOBS_DIR: /opt/datax/jobs
+      DATAX_EXEC_CONTAINER: dmp-ds
+    expose:
+      - "8000"
+    volumes:
+      - ./datax:/opt/datax
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - dmp-net
+
+  # ============================================
+  # Nginx - 统一入口 (唯一对外暴露端口的服务)
+  #   - 前端静态文件直接 serve
+  #   - 反向代理后端 API / DS / OM
+  # ============================================
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: dmp-nginx
+    restart: always
+    ports:
+      - "8888:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - frontend_dist:/usr/share/nginx/html:ro
+      - nginx_logs:/var/log/nginx
+    depends_on:
+      - portal-backend
+      - portal-frontend
+    networks:
+      - dmp-net
+
+  # ============================================
+  # Portal Frontend - 仅用于构建阶段
+  #   构建完成后由 Nginx 直接 serve 静态文件
+  # ============================================
+  portal-frontend:
+    build:
+      context: ./portal/frontend
+      dockerfile: Dockerfile
+    container_name: dmp-portal-web
+    restart: "no"
+    volumes:
+      - frontend_dist:/output
+    networks:
+      - dmp-net
+
+volumes:
+  mysql_data:
+  redis_data:
+  ds_logs:
+  om_data:
+  es_data:
+  nginx_logs:
+  frontend_dist:
+  demo_mysql_data:
+  demo_postgres_data:
+
+networks:
+  dmp-net:
+    driver: bridge

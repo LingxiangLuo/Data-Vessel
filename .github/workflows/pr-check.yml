@@ -1,0 +1,58 @@
+name: PR Check
+
+on:
+  pull_request:
+    branches: [dev]
+
+jobs:
+  frontend:
+    name: Frontend — type check & build
+    runs-on: self-hosted
+    defaults:
+      run:
+        working-directory: portal/frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: portal/frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline
+
+      - name: Type check
+        run: npx vue-tsc --noEmit
+
+      - name: Build
+        run: npx vite build
+
+  backend:
+    name: Backend — syntax check
+    runs-on: self-hosted
+    defaults:
+      run:
+        working-directory: portal/backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -q
+
+      - name: Syntax check
+        run: |
+          find . -name "*.py" -not -path "./.venv/*" | \
+            xargs python -m py_compile && echo "✅ No syntax errors"
+
+      - name: Import check (main entry)
+        run: python -c "import main" && echo "✅ main.py imports OK"
