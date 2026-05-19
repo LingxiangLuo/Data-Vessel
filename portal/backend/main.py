@@ -5,12 +5,12 @@ import bcrypt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# 结构化日志配置
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+from app.core.logging_config import setup_logging
+from app.core.request_id import RequestIdMiddleware
+
+# 开发环境用彩色文本，生产环境可设 JSON_FORMAT=true
+json_logs = os.environ.get("JSON_FORMAT", "").lower() in ("1", "true", "yes")
+setup_logging(json_format=json_logs)
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -229,6 +229,8 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# Request ID 必须第一个注册，确保后续所有中间件和路由都能使用
+app.add_middleware(RequestIdMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(
     CORSMiddleware,
