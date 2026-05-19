@@ -7,6 +7,7 @@ from sqlalchemy import func, desc
 
 from app.core.database import get_db
 from app.core.security import get_current_user, verify_service_token, get_service_user
+from app.models.workflow import Workflow
 from app.core.permissions import require_permission, check_resource_permission
 from app.core.dqc_engine import execute_rule
 from app.models.dqc_rule import DqcRule
@@ -146,9 +147,10 @@ async def _send_notifications(db: Session, rule: DqcRule, actual_value: str):
                 if isinstance(emails, str):
                     emails = [emails]
                 if emails:
+                    import asyncio
                     from app.core.notifier import send_email
                     for email in emails:
-                        send_email(email, title, content.replace("\n", "<br>"))
+                        await asyncio.to_thread(send_email, email, title, content.replace("\n", "<br>"))
         except Exception:
             pass
 
@@ -262,6 +264,14 @@ def toggle_rule(
     return _serialize_rule(r, db)
 
 
+def _verify_workflow_service_token(token: str, db: Session) -> bool:
+    """验证 per-workflow 服务 token，避免全局 token 泄露到 DS"""
+    if not token:
+        return False
+    wf = db.query(Workflow).filter(Workflow.service_token == token).first()
+    return wf is not None
+
+
 def _resolve_user_or_service(
     request: Request,
     db: Session = Depends(get_db),
@@ -271,10 +281,17 @@ def _resolve_user_or_service(
     from app.models.user import SysUser
 
     svc_token = request.headers.get("X-Service-Token")
-    if svc_token and verify_service_token(svc_token):
-        user = get_service_user(db)
-        if user:
-            return user
+    if svc_token:
+        # 优先验证 per-workflow token（安全，不泄露全局 token）
+        if _verify_workflow_service_token(svc_token, db):
+            user = get_service_user(db)
+            if user:
+                return user
+        # 回退到全局 token（向后兼容）
+        if verify_service_token(svc_token):
+            user = get_service_user(db)
+            if user:
+                return user
 
     # 回退到普通用户认证 —— 手动解析 token，不通过 Depends（避免 Depends 对象传入）
     token: Optional[str] = None

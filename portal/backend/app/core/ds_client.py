@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 class DSClient:
     _instance: Optional["DSClient"] = None
+    _instance_lock = asyncio.Lock()
 
     def __init__(self):
         self._base_url = settings.DS_API_URL
@@ -28,16 +29,17 @@ class DSClient:
             cls._instance = cls()
         return cls._instance
 
-    def _get_client(self) -> httpx.AsyncClient:
+    async def _get_client(self) -> httpx.AsyncClient:
         """延迟创建 client，避免 event loop 绑定问题"""
-        import asyncio
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=30.0)
+            async with self._lock:
+                if self._client is None:
+                    self._client = httpx.AsyncClient(timeout=30.0)
         return self._client
 
     async def _login(self) -> bool:
         try:
-            resp = await self._get_client().post(
+            resp = await (await self._get_client()).post(
                 f"{self._base_url}/login",
                 data={"userName": self._user, "userPassword": self._password},
             )
@@ -81,7 +83,7 @@ class DSClient:
         url = f"{self._base_url}{path}"
         cookies = {"sessionId": self._session_id}
         try:
-            resp = await self._get_client().request(method, url, cookies=cookies, **kwargs)
+            resp = await (await self._get_client()).request(method, url, cookies=cookies, **kwargs)
             result = resp.json()
             # 401 重认证
             if result.get("code") in (300, 190001) and retry:
@@ -112,7 +114,7 @@ class DSClient:
     async def healthy(self) -> bool:
         """检查 DS 是否可用"""
         try:
-            resp = await self._get_client().get(
+            resp = await (await self._get_client()).get(
                 f"{self._base_url}/actuator/health", timeout=5.0
             )
             data = resp.json()
@@ -325,6 +327,34 @@ class DSClient:
             },
         )
         return (data or {}).get("totalList", [])
+
+    async def get_process_instances(
+        self, state: str = None, page_no: int = 1, page_size: int = 100
+    ) -> list:
+        """获取流程实例列表，支持按状态过滤"""
+        pc = await self._discover_project()
+        if not pc:
+            return []
+        params = {"pageNo": page_no, "pageSize": page_size}
+        if state:
+            params["stateType"] = state
+        data = await self.get(f"/projects/{pc}/process-instances", params=params)
+        return (data or {}).get("totalList", [])
+
+    async def get_log_detail(self, task_instance_id: int, skip_line: int = 0, limit: int = 1000) -> str:
+        """获取任务日志详情，支持增量拉取"""
+        data = await self.get("/log/detail", params={
+            "taskInstanceId": task_instance_id,
+            "skipLineNum": skip_line,
+            "limit": limit,
+        })
+        if data is None:
+            return ""
+        if isinstance(data, dict):
+            return data.get("msg", "") or data.get("message", "") or str(data)
+        if isinstance(data, str):
+            return data
+        return str(data)
 
     # ─────────────────────────────────────────────
     # Datasource 管理

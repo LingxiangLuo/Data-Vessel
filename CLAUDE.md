@@ -28,6 +28,15 @@ cd portal/backend && uvicorn main:app --reload --port 8000
 # 后端语法检查
 cd portal/backend && python3 -m compileall -q -d . -x '/\.venv/' .
 
+# 后端 lint（ruff）
+cd portal/backend && ruff check .
+
+# 后端测试（全部）
+cd portal/backend && python3 -m pytest tests/
+
+# 后端测试（单个文件）
+cd portal/backend && python3 -m pytest tests/test_dsl_translator.py -v
+
 # 手动部署到测试服务器（任意分支均可）
 bash scripts/deploy-to-test.sh
 
@@ -120,6 +129,52 @@ ssh -i ~/.ssh/test_server_key root@192.168.1.3 'docker logs -f dmp-portal-api'
 - 路由定义在 `src/router/index.ts`，admin 子路由需加 `meta.permission`
 - 组件库：Arco Design（`@arco-design/web-vue`），不引入其他 UI 库
 - **无 `@/` 路径别名**，用相对路径
+
+## 核心子系统架构
+
+### 认证与安全
+
+认证采用双模式：浏览器走 httponly cookie（`access_token`），API 客户端走 Bearer token，两种方式在 `app/core/security.py:get_current_user` 中统一处理。
+
+- **CSRF 防护**：`main.py:CSRFProtectionMiddleware` 对携带 cookie 的非只读请求校验 `X-CSRF-Token` 请求头与 cookie 中的 `csrf_token` 是否一致；Bearer token 请求豁免
+- **Token 黑名单**：登出后 token 加入内存字典 `_token_blacklist`（进程重启后失效，属已知限制）
+- **权限体系**：RBAC，4 个内置角色（admin/developer/analyst/viewer），启动时在 `main.py` 中 seed。`require_permission("xxx:yyy")` 作为 FastAPI 依赖注入，admin 角色绕过所有权限检查
+- **必须配置**：`DQC_SERVICE_TOKEN` 环境变量，缺失时服务间调用不可用（启动时打 warning）
+
+### DSL 翻译流水线
+
+Portal 是 DolphinScheduler 的唯一控制面。发布流程：
+
+```
+Component (sql/python/shell/datax)
+    └→ app/core/dsl_translator.py → DS TaskDefinition JSON
+Workflow (DAG 节点 + 连线)
+    └→ dsl_translator.py → DS ProcessDefinition (taskDefinitionJson + taskRelationJson)
+    └→ app/core/ds_client.py (单例，维护 DS session) → DS REST API
+```
+
+DataX 组件不走 DS 原生 DataX 节点，而是翻译为 SHELL 节点 + heredoc 内嵌 JSON 调用 `datax.py`，避免版本耦合。`datax_builder.py` 负责把同步任务模型翻译成 DataX job.json。
+
+### 参数引擎
+
+`app/core/param_engine.py` 在任务执行前替换参数占位符，对标 DataWorks 调度参数体系：
+- 系统内置：`${bizdate}`（T-1）、`${cyctime}`、`${gmtdate}`
+- 日期格式：`${yyyymmdd}`、`${yyyy-mm-dd}`、`${yyyymmdd-7}`（偏移）
+- 自定义参数：组件中定义，值可引用其他参数；手动运行时可覆盖
+
+### DQC 数据质量子系统
+
+- `app/core/dqc_engine.py`：按规则类型生成校验 SQL（`row_count`/`null_percent`/`custom_sql` 等 14 种），通过 `db_adapter.py` 在目标数据源上执行
+- `app/core/dqc_scheduler.py`：APScheduler 后台线程，lifespan 启动/关闭，按 DqcReport 配置定时生成报告
+- `app/core/dqc_report_generator.py`：聚合检查结果生成报告；通知走 `notifier.py`（邮件/飞书/钉钉/企微 Webhook）
+
+### 前端权限控制
+
+两层：
+- **路由级**：`src/router/index.ts:beforeEach` 检查 `to.meta.permission`，无权限跳 `/403`
+- **元素级**：`src/directives/permission.ts` 的 `v-permission` 指令 + `useUserStore().hasPermission(code)`
+
+权限列表在登录后从 `/api/auth/me/permissions` 拉取，存于 Pinia `useUserStore`。
 
 ## Git 代理
 

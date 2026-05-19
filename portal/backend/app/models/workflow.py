@@ -1,4 +1,4 @@
-from sqlalchemy import Column, BigInteger, String, Integer, Text, DateTime, JSON
+from sqlalchemy import Column, BigInteger, String, Integer, Text, DateTime, JSON, ForeignKey
 from sqlalchemy.sql import func
 
 from app.core.database import Base
@@ -21,7 +21,7 @@ class Workflow(Base):
     # 调度状态: ONLINE / OFFLINE (DS 调度开关,与 status 是两回事)
     schedule_status = Column(String(50), default="OFFLINE", nullable=False)
     # 工作流生命周期: draft -> tested -> online -> offline
-    status = Column(String(50), default="draft", nullable=False)
+    status = Column(String(50), default="draft", nullable=False, index=True)
     version = Column(Integer, default=1, nullable=False)
     # 优先级: 1=P1高, 2=P2中, 3=P3低
     priority = Column(Integer, default=3, nullable=False)
@@ -30,9 +30,11 @@ class Workflow(Base):
     last_run_time = Column(DateTime)
     last_run_duration = Column(Integer)
     # 发布后映射到 DS process-definition code (Phase 5/6 填入)
-    ds_process_code = Column(BigInteger)
+    ds_process_code = Column(BigInteger, index=True)
     # 调度 schedule id (Phase 5/6 填入)
-    ds_schedule_id = Column(BigInteger)
-    created_by = Column(BigInteger)
+    ds_schedule_id = Column(BigInteger, index=True)
+    # per-workflow DQC 服务 token（避免全局 token 泄露到 DS）
+    service_token = Column(String(64), nullable=True, index=True)
+    created_by = Column(BigInteger, ForeignKey("sys_user.id", ondelete="SET NULL"))
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

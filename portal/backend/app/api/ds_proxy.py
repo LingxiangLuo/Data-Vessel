@@ -1,8 +1,11 @@
 """DolphinScheduler API 代理路由 — 所有 /api/ds/* 端点"""
+import asyncio
 import logging
 from datetime import datetime, timedelta
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -414,18 +417,41 @@ async def list_instance_tasks(
 @router.get("/tasks/{task_id}/log")
 async def get_task_log(
     task_id: int,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(1000, ge=1, le=10000),
+    level: Optional[str] = Query(None, pattern=r"^(ERROR|WARN|INFO|DEBUG)$"),
     current_user: SysUser = Depends(get_current_user),
 ):
-    """获取任务日志"""
+    """获取任务日志（优先本地缓存，fallback 到 DS 透传）"""
+    from app.core.ds_log_scheduler import get_log_lines, get_log_stats
+
+    # 尝试从本地读取
+    lines = get_log_lines(task_id, offset, limit)
+    if lines:
+        if level:
+            level_upper = level.upper()
+            lines = [ln for ln in lines if f"[{level_upper}]" in ln.upper() or level_upper in ln.upper()]
+        stats = get_log_stats(task_id)
+        return {
+            "taskInstanceId": task_id,
+            "log": "\n".join(lines),
+            "lines": lines,
+            "offset": offset,
+            "limit": limit,
+            "total_lines": stats.get("total_lines", 0) if stats else 0,
+            "source": "local",
+            "stats": stats,
+        }
+
+    # Fallback 到 DS 透传
     ds = _ds()
     data = await ds.get("/log/detail", params={
         "taskInstanceId": task_id,
-        "skipLineNum": 0,
-        "limit": 10000,
+        "skipLineNum": offset,
+        "limit": limit,
     })
     if data is None:
         raise HTTPException(502, "获取日志失败")
-    # data 通常是 {"message": "success", "msg": "..."} 或日志文本
     log_content = ""
     if isinstance(data, dict):
         log_content = data.get("msg", "") or data.get("message", "") or str(data)
@@ -433,7 +459,108 @@ async def get_task_log(
         log_content = data
     else:
         log_content = str(data)
-    return {"taskInstanceId": task_id, "log": log_content}
+    return {
+        "taskInstanceId": task_id,
+        "log": log_content,
+        "lines": log_content.splitlines(),
+        "offset": offset,
+        "limit": limit,
+        "source": "ds",
+    }
+
+
+@router.get("/tasks/{task_id}/log/stream")
+async def stream_task_log(
+    task_id: int,
+    current_user: SysUser = Depends(get_current_user),
+):
+    """SSE 实时推送任务日志增量（最大 15 分钟）"""
+    from app.core.ds_log_scheduler import get_log_lines, get_log_stats
+    import json
+
+    MAX_STREAM_SECONDS = 900  # 15 分钟上限
+    stream_start = asyncio.get_event_loop().time()
+
+    async def event_generator():
+        last_offset = 0
+        last_state = None
+        last_new_line_time = asyncio.get_event_loop().time()
+        while True:
+            now = asyncio.get_event_loop().time()
+            if now - stream_start > MAX_STREAM_SECONDS:
+                yield f"event: done\ndata: timeout\n\n"
+                break
+
+            lines = get_log_lines(task_id, last_offset, 1000)
+            stats = get_log_stats(task_id)
+
+            # 推送新增日志
+            if lines:
+                for line in lines:
+                    yield f"event: log\ndata: {line}\n\n"
+                last_offset += len(lines)
+                last_new_line_time = now
+
+            # 推送状态变更
+            current_state = stats.get("task_state") if stats else None
+            if current_state and current_state != last_state:
+                yield f"event: status\ndata: {current_state}\n\n"
+                last_state = current_state
+
+            # 推送统计信息
+            if stats and stats.get("summary"):
+                yield f"event: stats\ndata: {json.dumps(stats['summary'], default=str)}\n\n"
+
+            # 任务已归档则结束流
+            if stats and stats.get("is_archived"):
+                yield f"event: done\ndata: archived\n\n"
+                break
+
+            # 5 分钟无新日志则结束流
+            if now - last_new_line_time > 300:
+                yield f"event: done\ndata: idle\n\n"
+                break
+
+            await asyncio.sleep(2)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@router.get("/tasks/{task_id}/log/search")
+async def search_task_log(
+    task_id: int,
+    keyword: str = Query(..., min_length=1),
+    current_user: SysUser = Depends(get_current_user),
+):
+    """全文搜索任务日志"""
+    from app.core.ds_log_scheduler import search_log_lines
+    results = search_log_lines(task_id, keyword)
+    return {
+        "taskInstanceId": task_id,
+        "keyword": keyword,
+        "matches": results,
+        "match_count": len(results),
+    }
+
+
+@router.get("/tasks/{task_id}/log/stats")
+async def get_task_log_stats(
+    task_id: int,
+    current_user: SysUser = Depends(get_current_user),
+):
+    """获取任务日志统计信息"""
+    from app.core.ds_log_scheduler import get_log_stats
+    stats = get_log_stats(task_id)
+    if not stats:
+        raise HTTPException(404, "日志记录不存在")
+    return stats
 
 
 @router.post("/instances/{instance_id}/rerun")

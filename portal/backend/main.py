@@ -8,18 +8,19 @@ from contextlib import asynccontextmanager
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app.core.logging_config import setup_logging
-from app.core.request_id import RequestIdMiddleware
+from app.core.request_id import RequestIdMiddleware, get_request_id
 
 # 开发环境用彩色文本，生产环境可设 JSON_FORMAT=true
 json_logs = os.environ.get("JSON_FORMAT", "").lower() in ("1", "true", "yes")
 setup_logging(json_format=json_logs)
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from app.core.database import engine, Base, SessionLocal
 from app.core.config import settings
 from app.core.security import hash_password
+from app.core.access_log import AccessLogMiddleware
 
 # ─── 启动时安全校验 ──────────────────────────────────────────────────────────
 if not getattr(settings, "DQC_SERVICE_TOKEN", ""):
@@ -38,6 +39,7 @@ from app.models.sys_notify_channel import SysNotifyChannel  # noqa: F401
 from app.models.dqc_rule import DqcRule  # noqa: F401
 from app.models.dqc_check import DqcCheck  # noqa: F401
 from app.models.dqc_report import DqcReport, DqcReportHistory  # noqa: F401
+from app.models.ds_task_log import DSTaskLog  # noqa: F401
 
 # 数据库迁移：优先使用 Alembic
 import subprocess
@@ -151,9 +153,6 @@ def _seed_roles_and_permissions():
         db.close()
 
 
-_seed_roles_and_permissions()
-
-
 # 确保管理员账号存在并关联 RBAC admin 角色
 def _ensure_admin():
     from app.models.user import SysUser
@@ -207,9 +206,6 @@ def _ensure_default_project():
         db.close()
 
 
-_ensure_admin()
-_ensure_default_project()
-
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
@@ -240,14 +236,14 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
       - 使用 Bearer token 的请求（API 客户端）
       - /api/auth/* 路径（登录/登出/OAuth 本身）
     """
-    EXEMPT_PATHS = {"/api/auth/login", "/api/auth/logout", "/api/auth/oauth", "/api/auth/csrf", "/api/health"}
+    EXEMPT_PATHS = {"/api/auth/login", "/api/auth/logout", "/api/auth/oauth", "/api/auth/csrf", "/api/health", "/api/log/frontend"}
 
     async def dispatch(self, request: Request, call_next):
         if request.method in ("GET", "HEAD", "OPTIONS"):
             return await call_next(request)
 
         path = request.url.path
-        if any(path.startswith(p) for p in self.EXEMPT_PATHS):
+        if path in self.EXEMPT_PATHS:
             return await call_next(request)
 
         # 有 Bearer token 的请求不需要 CSRF（API 客户端场景）
@@ -275,10 +271,38 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import asyncio
     from app.core.dqc_scheduler import start_scheduler, shutdown_scheduler
+    from app.core.ds_log_scheduler import start_log_scheduler, shutdown_log_scheduler
+    from app.core.security import _cleanup_expired_tokens
+
     start_scheduler()
+    start_log_scheduler()
+
+    # 启动时种子数据（只执行一次）
+    await asyncio.to_thread(_seed_roles_and_permissions)
+    await asyncio.to_thread(_ensure_admin)
+    await asyncio.to_thread(_ensure_default_project)
+
+    _token_cleanup_stop = asyncio.Event()
+
+    async def _cleanup_loop():
+        while not _token_cleanup_stop.is_set():
+            try:
+                await asyncio.wait_for(_token_cleanup_stop.wait(), timeout=60)
+            except asyncio.TimeoutError:
+                _cleanup_expired_tokens()
+
+    cleanup_task = asyncio.create_task(_cleanup_loop())
     yield
+    _token_cleanup_stop.set()
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
     shutdown_scheduler()
+    shutdown_log_scheduler()
 
 
 app = FastAPI(
@@ -292,6 +316,7 @@ app = FastAPI(
 )
 
 app.add_middleware(RequestIdMiddleware)
+app.add_middleware(AccessLogMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(CSRFProtectionMiddleware)
 app.add_middleware(
@@ -301,6 +326,53 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*", "X-CSRF-Token", "X-Request-ID"],
 )
+
+# ─── 全局异常处理器 ──────────────────────────────────────────────────────────
+
+from fastapi.responses import JSONResponse
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """捕获所有未处理异常，统一格式输出"""
+    logger = logging.getLogger("portal")
+    req_id = get_request_id() or "-"
+    logger.error(
+        "Unhandled exception: %s | path=%s method=%s request_id=%s",
+        exc,
+        request.url.path,
+        request.method,
+        req_id,
+        exc_info=True,
+    )
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": "服务器内部错误",
+            "request_id": req_id,
+            "path": request.url.path,
+        },
+    )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """HTTPException 统一包装 request_id"""
+    req_id = get_request_id() or "-"
+    if exc.status_code >= 500:
+        logging.getLogger("portal").error(
+            "HTTPException %s: %s | path=%s request_id=%s",
+            exc.status_code,
+            exc.detail,
+            request.url.path,
+            req_id,
+        )
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "detail": exc.detail,
+            "request_id": req_id,
+        },
+    )
 
 app.include_router(auth.router, prefix="/api")
 app.include_router(datasources.router, prefix="/api")
@@ -328,6 +400,9 @@ app.include_router(dqc_rules.router, prefix="/api")
 
 from app.api import dqc_reports
 app.include_router(dqc_reports.router, prefix="/api")
+
+from app.api import frontend_log
+app.include_router(frontend_log.router, prefix="/api")
 
 @app.get("/api/health")
 def health():

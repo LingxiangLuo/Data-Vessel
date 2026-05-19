@@ -11,6 +11,43 @@ from app.models.datasource import DataSource
 
 logger = logging.getLogger(__name__)
 
+
+def _validate_custom_sql(sql: str) -> str:
+    """校验 custom_sql：仅允许单条 SELECT，禁止 DML/DDL/注释绕过。
+    返回清理后的 SQL（已移除注释）。"""
+    import re
+
+    # 1. 移除块注释 /* ... */
+    cleaned = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
+    # 2. 移除行注释 -- ...
+    lines = [line.split("--")[0] for line in cleaned.split("\n")]
+    cleaned = " ".join(lines)
+    # 3. 规范化空白
+    cleaned = " ".join(cleaned.split())
+
+    # 4. 仅允许单条语句（无分号）
+    stripped = cleaned.rstrip(";").strip()
+    if ";" in stripped:
+        raise ValueError("custom_sql 只允许单条 SELECT 语句")
+
+    # 5. 必须以 SELECT 开头
+    upper = stripped.upper()
+    if not upper.startswith("SELECT"):
+        raise ValueError("custom_sql 只允许 SELECT 语句")
+
+    # 6. 禁止关键字（整词匹配，防止子串误报）
+    forbidden = (
+        "DROP", "DELETE", "UPDATE", "INSERT", "TRUNCATE",
+        "ALTER", "CREATE", "GRANT", "REVOKE", "EXEC", "EXECUTE",
+        "UNION", "INTO", "LOAD", "COPY",
+    )
+    for kw in forbidden:
+        if re.search(rf"\b{kw}\b", upper):
+            raise ValueError(f"custom_sql 包含非法关键字: {kw}")
+
+    return stripped
+
+
 # 规则类型 → 是否需要字段名
 RULE_REQUIRES_COLUMN = {
     "row_count": False,
@@ -116,17 +153,10 @@ def generate_check_sql(
         return f"SELECT {rule_type.upper()}({col}) FROM {tbl}", None
 
     if rule_type == "custom_sql":
-        sql = extra.get("custom_sql", "").strip()
-        if not sql:
+        raw = extra.get("custom_sql", "").strip()
+        if not raw:
             raise ValueError("custom_sql 规则需要提供 extra_config.custom_sql")
-        upper = sql.upper()
-        # 仅允许 SELECT 语句，禁止 DML/DDL
-        if not upper.startswith("SELECT"):
-            raise ValueError("custom_sql 只允许 SELECT 语句")
-        forbidden = ("DROP", "DELETE", "UPDATE", "INSERT", "TRUNCATE", "ALTER", "CREATE", "GRANT", "REVOKE")
-        for kw in forbidden:
-            if kw in upper:
-                raise ValueError(f"custom_sql 包含非法关键字: {kw}")
+        sql = _validate_custom_sql(raw)
         return sql, None
 
     if rule_type == "regex_match_percent":

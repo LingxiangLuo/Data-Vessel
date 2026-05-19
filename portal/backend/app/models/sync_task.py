@@ -1,4 +1,4 @@
-from sqlalchemy import Column, BigInteger, Integer, String, Text, DateTime
+from sqlalchemy import Column, BigInteger, Integer, String, Text, DateTime, ForeignKey
 from sqlalchemy.sql import func
 
 from app.core.database import Base
@@ -9,7 +9,7 @@ class SyncTask(Base):
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     name = Column(String(128), nullable=False)
-    project_id = Column(BigInteger, comment="所属项目 — NULL 时归属默认未分组项目")
+    project_id = Column(BigInteger, ForeignKey("project.id", ondelete="SET NULL"), comment="所属项目 — NULL 时归属默认未分组项目")
     source_id = Column(BigInteger, nullable=False)
     target_id = Column(BigInteger, nullable=False)
     source_table = Column(String(128), nullable=False)
@@ -24,11 +24,11 @@ class SyncTask(Base):
     channel = Column(Integer, default=3, comment="DataX 并发通道数，1-32")
     pre_sql = Column(Text, comment="导入前 SQL 列表 JSON 数组（目标库执行）")
     post_sql = Column(Text, comment="导入后 SQL 列表 JSON 数组（目标库执行）")
-    ds_workflow_id = Column(BigInteger)
-    component_id = Column(BigInteger, comment="关联组件ID")
+    ds_workflow_id = Column(BigInteger, ForeignKey("workflow.id", ondelete="SET NULL"), index=True)
+    component_id = Column(BigInteger, ForeignKey("component.id", ondelete="SET NULL"), index=True, comment="关联组件ID")
     status = Column(String(32), default="draft")
     last_run_time = Column(DateTime)
     last_run_status = Column(String(32))
-    created_by = Column(BigInteger)
+    created_by = Column(BigInteger, ForeignKey("sys_user.id", ondelete="SET NULL"))
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

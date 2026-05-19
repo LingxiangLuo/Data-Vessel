@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import hashlib
+import secrets
 import time
 
 import jwt
@@ -22,6 +23,20 @@ _COOKIE_NAME = "access_token"
 # Token 黑名单（内存 + Redis）
 # 使用 dict 存储 {token_hash: exp_timestamp}，定期清理过期的条目
 _token_blacklist: dict[str, float] = {}
+
+_redis_pool = None
+
+
+def _get_redis():
+    """延迟初始化并复用 Redis 连接池"""
+    global _redis_pool
+    if _redis_pool is None:
+        try:
+            import redis
+            _redis_pool = redis.from_url(settings.REDIS_URL, socket_connect_timeout=1)
+        except Exception:
+            return None
+    return _redis_pool
 
 
 def _token_hash(token: str) -> str:
@@ -52,12 +67,12 @@ def add_to_blacklist(token: str) -> None:
     # 定期清理过期条目（每 100 次写入触发一次）
     if len(_token_blacklist) % 100 == 0:
         _cleanup_expired_tokens()
-    try:
-        import redis
-        r = redis.from_url(settings.REDIS_URL, socket_connect_timeout=1)
-        r.setex(f"token_blacklist:{h}", ttl, "1")
-    except Exception:
-        pass
+    r = _get_redis()
+    if r:
+        try:
+            r.setex(f"token_blacklist:{h}", ttl, "1")
+        except Exception:
+            pass
 
 
 def is_token_blacklisted(token: str) -> bool:
@@ -68,12 +83,13 @@ def is_token_blacklisted(token: str) -> bool:
         # 已过期，清理
         _token_blacklist.pop(h, None)
         return False
-    try:
-        import redis
-        r = redis.from_url(settings.REDIS_URL, socket_connect_timeout=1)
-        return r.exists(f"token_blacklist:{h}") == 1
-    except Exception:
-        return False
+    r = _get_redis()
+    if r:
+        try:
+            return r.exists(f"token_blacklist:{h}") == 1
+        except Exception:
+            return False
+    return False
 
 
 def hash_password(password: str) -> str:
@@ -87,16 +103,31 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 def create_access_token(data: dict) -> str:
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire})
+    to_encode.update({
+        "exp": expire,
+        "aud": getattr(settings, "JWT_AUDIENCE", "portal-api"),
+        "iss": getattr(settings, "JWT_ISSUER", "data-vessel-portal"),
+    })
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
 def _decode_token(token: str) -> Optional[str]:
     try:
-        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        payload = jwt.decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=[settings.ALGORITHM],
+            audience=getattr(settings, "JWT_AUDIENCE", "portal-api"),
+            issuer=getattr(settings, "JWT_ISSUER", "data-vessel-portal"),
+        )
         return payload.get("sub")
     except jwt.PyJWTError:
-        return None
+        # 兼容旧 token（不含 aud/iss）
+        try:
+            payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+            return payload.get("sub")
+        except jwt.PyJWTError:
+            return None
 
 
 def get_current_user(
@@ -129,13 +160,13 @@ def get_current_user(
 
 
 def verify_service_token(token: str) -> bool:
-    """校验服务间调用 token（DS SHELL 任务调用 Portal API 时使用）"""
+    """校验全局服务间调用 token（向后兼容）"""
     if not token:
         return False
     expected = getattr(settings, "DQC_SERVICE_TOKEN", "")
     if not expected:
         return False
-    return token == expected
+    return secrets.compare_digest(token, expected)
 
 
 def get_service_user(db: Session) -> Optional[SysUser]:

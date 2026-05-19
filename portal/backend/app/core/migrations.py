@@ -17,6 +17,10 @@ def run_all_migrations():
     _migrate_alert_rule_channel_ids()
     _migrate_sync_task_component_id()
     _migrate_datax_to_component()
+    _migrate_workflow_service_token()
+    _migrate_performance_indexes()
+    _migrate_ds_task_log_table()
+    _migrate_foreign_keys()
 
 
 def _migrate_sync_task_columns():
@@ -310,3 +314,153 @@ def _migrate_datax_to_component():
         raise
     finally:
         db.close()
+
+
+def _migrate_workflow_service_token():
+    with engine.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'workflow'"
+        )).fetchall()
+        existing = {r[0] for r in rows}
+        if 'service_token' not in existing:
+            conn.execute(text(
+                "ALTER TABLE workflow ADD COLUMN service_token VARCHAR(64) NULL COMMENT 'per-workflow DQC服务token'"
+            ))
+            conn.commit()
+        rows_idx = conn.execute(text(
+            "SELECT INDEX_NAME FROM information_schema.STATISTICS "
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'workflow' AND INDEX_NAME = 'ix_workflow_service_token'"
+        )).fetchall()
+        if not rows_idx:
+            conn.execute(text(
+                "CREATE INDEX ix_workflow_service_token ON workflow(service_token)"
+            ))
+            conn.commit()
+
+
+def _migrate_performance_indexes():
+    """补充高频查询场景的索引"""
+    with engine.connect() as conn:
+        def _ensure_index(table, idx_name, cols):
+            rows = conn.execute(text(
+                "SELECT INDEX_NAME FROM information_schema.STATISTICS "
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :t AND INDEX_NAME = :i"
+            ), {"t": table, "i": idx_name}).fetchall()
+            if not rows:
+                conn.execute(text(f"CREATE INDEX {idx_name} ON {table}({cols})"))
+                conn.commit()
+
+        _ensure_index("workflow", "ix_workflow_status", "status")
+        _ensure_index("workflow", "ix_workflow_ds_process_code", "ds_process_code")
+        _ensure_index("workflow", "ix_workflow_ds_schedule_id", "ds_schedule_id")
+        _ensure_index("component", "ix_component_type", "type")
+        _ensure_index("component", "ix_component_folder_id", "folder_id")
+        _ensure_index("component", "ix_component_status", "status")
+        _ensure_index("sync_task", "ix_sync_task_component_id", "component_id")
+        _ensure_index("sync_task", "ix_sync_task_ds_workflow_id", "ds_workflow_id")
+
+
+def _migrate_ds_task_log_table():
+    with engine.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT TABLE_NAME FROM information_schema.TABLES "
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'ds_task_log'"
+        )).fetchall()
+        if not rows:
+            conn.execute(text("""
+                CREATE TABLE ds_task_log (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    task_instance_id BIGINT NOT NULL UNIQUE,
+                    process_instance_id BIGINT NOT NULL,
+                    task_name VARCHAR(255) NOT NULL,
+                    task_type VARCHAR(50) NOT NULL,
+                    task_state VARCHAR(50) NULL,
+                    storage_path VARCHAR(512) NULL COMMENT '日志文件路径',
+                    total_lines INT NOT NULL DEFAULT 0,
+                    error_count INT NOT NULL DEFAULT 0,
+                    warn_count INT NOT NULL DEFAULT 0,
+                    info_count INT NOT NULL DEFAULT 0,
+                    debug_count INT NOT NULL DEFAULT 0,
+                    last_fetched_line INT NOT NULL DEFAULT 0 COMMENT '已拉取到最后行号',
+                    summary_json JSON NULL COMMENT 'DataX 统计等结构化数据',
+                    is_archived TINYINT NOT NULL DEFAULT 0,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    INDEX ix_process_instance_id (process_instance_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """))
+            conn.commit()
+
+
+def _migrate_foreign_keys():
+    """清理孤儿数据并添加外键约束（仅 MySQL）。
+
+    幂等：已存在的外键不会重复添加。
+    """
+    with engine.connect() as conn:
+        # SQLite 不支持 ALTER TABLE ADD FOREIGN KEY，跳过
+        dialect = engine.dialect.name
+        if dialect != "mysql":
+            return
+
+        # -- 1. 清理孤儿数据 --
+        conn.execute(text("""
+            UPDATE sync_task
+            SET component_id = NULL
+            WHERE component_id IS NOT NULL
+              AND component_id NOT IN (SELECT id FROM component)
+        """))
+        conn.execute(text("""
+            DELETE FROM component_history
+            WHERE component_id NOT IN (SELECT id FROM component)
+        """))
+        conn.execute(text("""
+            DELETE FROM dqc_check
+            WHERE rule_id NOT IN (SELECT id FROM dqc_rule)
+        """))
+        conn.commit()
+
+        # -- 2. 获取已有外键约束名 --
+        existing_fks = {
+            r[0] for r in conn.execute(text("""
+                SELECT CONSTRAINT_NAME
+                FROM information_schema.TABLE_CONSTRAINTS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND CONSTRAINT_TYPE = 'FOREIGN KEY'
+            """)).fetchall()
+        }
+
+        # -- 3. 定义需要添加的外键 --
+        fks = [
+            ("sync_task",        "fk_sync_task_component_id",    "component_id",    "component(id)",       "SET NULL"),
+            ("sync_task",        "fk_sync_task_ds_workflow_id",  "ds_workflow_id",  "workflow(id)",        "SET NULL"),
+            ("sync_task",        "fk_sync_task_created_by",      "created_by",      "sys_user(id)",        "SET NULL"),
+            ("sync_task",        "fk_sync_task_project_id",      "project_id",      "project(id)",         "SET NULL"),
+            ("component",        "fk_component_folder_id",       "folder_id",       "component_folder(id)", "SET NULL"),
+            ("component",        "fk_component_created_by",      "created_by",      "sys_user(id)",        "SET NULL"),
+            ("component_history", "fk_component_history_component_id", "component_id", "component(id)",     "CASCADE"),
+            ("dqc_check",        "fk_dqc_check_rule_id",         "rule_id",         "dqc_rule(id)",        "CASCADE"),
+            ("dqc_rule",         "fk_dqc_rule_datasource_id",    "datasource_id",   "data_source(id)",     "CASCADE"),
+            ("dqc_rule",         "fk_dqc_rule_component_id",     "component_id",    "component(id)",       "SET NULL"),
+            ("dqc_rule",         "fk_dqc_rule_created_by",       "created_by",      "sys_user(id)",        "SET NULL"),
+            ("workflow",         "fk_workflow_created_by",       "created_by",      "sys_user(id)",        "SET NULL"),
+            ("dqc_report_history", "fk_dqc_report_history_report_id", "report_id",   "dqc_report(id)",      "CASCADE"),
+        ]
+
+        for table, name, col, ref, ondelete in fks:
+            if name in existing_fks:
+                continue
+            try:
+                conn.execute(text(
+                    f"ALTER TABLE {table} ADD CONSTRAINT {name} "
+                    f"FOREIGN KEY ({col}) REFERENCES {ref} ON DELETE {ondelete}"
+                ))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                import logging
+                logging.getLogger(__name__).warning(
+                    "添加外键 %s 失败（表 %s.%s -> %s），可能仍存在孤儿数据",
+                    name, table, col, ref
+                )

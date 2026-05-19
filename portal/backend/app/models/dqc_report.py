@@ -1,5 +1,5 @@
 """数据质量报告模型"""
-from sqlalchemy import Column, BigInteger, String, Integer, Boolean, DateTime, Text, JSON
+from sqlalchemy import Column, BigInteger, String, Integer, Boolean, DateTime, Text, JSON, ForeignKey
 from sqlalchemy.sql import func
 
 from app.core.database import Base
@@ -26,7 +26,7 @@ class DqcReportHistory(Base):
     __tablename__ = "dqc_report_history"
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
-    report_id = Column(BigInteger, nullable=False, index=True)
+    report_id = Column(BigInteger, ForeignKey("dqc_report.id", ondelete="CASCADE"), nullable=False, index=True)
     period_start = Column(DateTime, nullable=False)
     period_end = Column(DateTime, nullable=False)
     content_json = Column(JSON, nullable=True)  # 报告完整内容

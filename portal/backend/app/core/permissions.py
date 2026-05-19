@@ -9,15 +9,21 @@ from app.core.security import get_current_user
 
 def _is_admin(db: Session, user) -> bool:
     """判断用户是否为管理员（兼容旧 role 字段和新 RBAC 角色表）"""
+    cached = getattr(user, "_is_admin_cached", None)
+    if cached is not None:
+        return cached
     if getattr(user, "role", None) == "admin":
+        user._is_admin_cached = True
         return True
     from app.models.role import SysUserRole, SysRole
-    return db.query(SysUserRole).join(
+    result = db.query(SysUserRole).join(
         SysRole, SysRole.id == SysUserRole.role_id
     ).filter(
         SysUserRole.user_id == user.id,
         SysRole.code == "admin",
     ).first() is not None
+    user._is_admin_cached = result
+    return result
 
 
 def require_permission(code: str):

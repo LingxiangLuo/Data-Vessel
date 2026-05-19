@@ -1,4 +1,5 @@
 """通知发送工具 — 支持邮件、飞书/钉钉/企微 Webhook"""
+import asyncio
 import logging
 import os
 import smtplib
@@ -22,8 +23,8 @@ def _get_smtp_config() -> dict:
                 return row.value
         finally:
             db.close()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("读取 SMTP 配置失败，降级到环境变量: %s", e)
     return {
         "host": os.getenv("SMTP_HOST", "smtp.163.com"),
         "port": int(os.getenv("SMTP_PORT", "465")),
@@ -148,10 +149,15 @@ def send_email(to: str, subject: str, body: str, smtp_config: dict = None) -> bo
         else:
             server = smtplib.SMTP(config["host"], config["port"], timeout=10)
             server.starttls()
-        server.login(config["user"], config["password"])
-        server.sendmail(config["user"], [to], msg.as_string())
-        server.quit()
-        return True
+        try:
+            server.login(config["user"], config["password"])
+            server.sendmail(config["user"], [to], msg.as_string())
+            return True
+        finally:
+            try:
+                server.quit()
+            except Exception:
+                pass
     except Exception as e:
         logger.error(f"邮件发送失败: {e}")
         return False
@@ -214,7 +220,7 @@ async def _send_via_channel(channel, title: str, content: str) -> bool:
         html_body = content.replace("\n", "<br>")
         ok_all = True
         for email in emails:
-            if not send_email(email, title, html_body):
+            if not await asyncio.to_thread(send_email, email, title, html_body):
                 ok_all = False
         return ok_all
 
@@ -299,7 +305,7 @@ async def notify(rule, event: dict) -> bool:
             logger.warning(f"规则 {rule.name} 邮箱地址为空")
             return False
         html_body = content.replace("\n", "<br>")
-        return send_email(email, title, html_body)
+        return await asyncio.to_thread(send_email, email, title, html_body)
 
     logger.warning(f"规则 {rule.name} 无有效通知配置")
     return False

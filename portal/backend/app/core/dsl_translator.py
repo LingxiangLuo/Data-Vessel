@@ -338,9 +338,11 @@ def translate_dqc_task(
     check_url = f"{portal_base_url}/api/dqc-rules/{rule.id}/check"
     exit_cmd = "exit 1" if is_strong else 'echo "[DQC] Weak rule, continuing..."'
 
+    # 安全：单引号包裹 token，转义内部单引号防止 shell 注入
+    safe_token = service_token.replace("'", "'\\''") if service_token else ""
     script = f'''set -e
 CHECK_URL="{check_url}"
-SVC_TOKEN="{service_token}"
+SVC_TOKEN='{safe_token}'
 echo "[DQC] Running check for rule #{rule.id}..."
 RESULT=$(curl -s -X POST "$CHECK_URL" \\
   -H "X-Service-Token: $SVC_TOKEN" \\
@@ -555,18 +557,12 @@ def translate_workflow_dag(
                 "conditionParams": {},
             })
 
-    # 普通边 + DQC 插入
-    for e in active_edges:
-        if e["source"] not in node_ids or e["target"] not in node_ids:
-            continue
-        source_code = node_to_task_code[e["source"]]
-        target_code = node_to_task_code[e["target"]]
-
-        dqc_chain = node_to_dqc_codes.get(e["source"], [])
+    # DQC 链内部连接（每个 source 节点只插入一次，避免汇聚时重复）
+    for node in active_nodes:
+        dqc_chain = node_to_dqc_codes.get(node["id"], [])
         if dqc_chain:
-            # 组件 → DQC1
             relations.append({
-                "preTaskCode": source_code,
+                "preTaskCode": node_to_task_code[node["id"]],
                 "preTaskVersion": 0,
                 "postTaskCode": dqc_chain[0],
                 "postTaskVersion": 0,
@@ -574,7 +570,6 @@ def translate_workflow_dag(
                 "conditionType": "NONE",
                 "conditionParams": {},
             })
-            # DQC 链内部连接
             for j in range(1, len(dqc_chain)):
                 relations.append({
                     "preTaskCode": dqc_chain[j - 1],
@@ -585,26 +580,24 @@ def translate_workflow_dag(
                     "conditionType": "NONE",
                     "conditionParams": {},
                 })
-            # 最后一个 DQC → 原下游
-            relations.append({
-                "preTaskCode": dqc_chain[-1],
-                "preTaskVersion": 0,
-                "postTaskCode": target_code,
-                "postTaskVersion": 0,
-                "name": "",
-                "conditionType": "NONE",
-                "conditionParams": {},
-            })
-        else:
-            # 无 DQC，保持原边
-            relations.append({
-                "preTaskCode": source_code,
-                "preTaskVersion": 0,
-                "postTaskCode": target_code,
-                "postTaskVersion": 0,
-                "name": "",
-                "conditionType": "NONE",
-                "conditionParams": {},
+
+    # 普通边：有 DQC 的节点从最后一个 DQC 任务引出，无 DQC 保持原边
+    for e in active_edges:
+        if e["source"] not in node_ids or e["target"] not in node_ids:
+            continue
+        source_code = node_to_task_code[e["source"]]
+        target_code = node_to_task_code[e["target"]]
+        dqc_chain = node_to_dqc_codes.get(e["source"], [])
+        if dqc_chain:
+            source_code = dqc_chain[-1]
+        relations.append({
+            "preTaskCode": source_code,
+            "preTaskVersion": 0,
+            "postTaskCode": target_code,
+            "postTaskVersion": 0,
+            "name": "",
+            "conditionType": "NONE",
+            "conditionParams": {},
             })
 
     # 为 DQC 任务生成位置（放在对应组件的右下方）

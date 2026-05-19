@@ -89,7 +89,7 @@ def _connect(ds: DataSource, db_override: Optional[str] = None):
         safe_db = "".join(c for c in database if c.isalnum() or c == "_")
         if not safe_db:
             safe_db = "public"
-        cur.execute(f'SET search_path TO "{safe_db}", public')
+        cur.execute("SET search_path TO %s, public", (safe_db,))
         cur.close()
         return conn
     if t == "sqlserver":

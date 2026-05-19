@@ -3,6 +3,8 @@ import subprocess
 import tempfile
 import os
 import re
+import ast
+import shlex
 from typing import Optional, Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -669,6 +671,33 @@ def delete_component(
     return {"message": "删除成功"}
 
 
+def _validate_python_ast(tree: ast.AST):
+    """AST 静态检查：禁止危险模块导入和危险函数调用"""
+    forbidden_imports = {"os", "subprocess", "socket", "urllib", "http", "ftplib", "telnetlib"}
+    forbidden_calls = {
+        "system", "popen", "spawn", "fork", "execv", "execve",
+        "call", "run", "Popen", "check_output", "check_call",
+        "exec", "eval", "compile", "open",
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top = alias.name.split(".")[0]
+                if top in forbidden_imports:
+                    raise HTTPException(400, f"Python 组件禁止导入模块: {alias.name}")
+        elif isinstance(node, ast.ImportFrom):
+            top = (node.module or "").split(".")[0]
+            if top in forbidden_imports:
+                raise HTTPException(400, f"Python 组件禁止从模块导入: {node.module}")
+        elif isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Attribute):
+                if node.func.attr in forbidden_calls:
+                    raise HTTPException(400, f"Python 组件禁止调用方法: {node.func.attr}")
+            elif isinstance(node.func, ast.Name):
+                if node.func.id in forbidden_calls:
+                    raise HTTPException(400, f"Python 组件禁止调用函数: {node.func.id}")
+
+
 # ===== 运行组件 =====
 @router.post("/{comp_id}/run")
 def run_component(
@@ -747,16 +776,32 @@ def run_component(
     elif c.type in ("python", "shell"):
         # 安全沙箱校验
         if c.type == "shell":
-            # 禁止 shell 元字符：管道、重定向、命令替换、逻辑运算符、分号、换行
+            # 1. 禁止 shell 元字符：管道、重定向、命令替换、逻辑运算符、分号、换行
             if re.search(r"[;|&<>{}()$`\n\r]|&&|\|\|", code):
                 raise HTTPException(400, "Shell 组件禁止包含危险字符（; | & < > { } ( ) $ ` && || 换行）")
+            # 2. 禁止危险内建命令
+            forbidden_cmds = {"eval", "exec", "source", ".", "bash", "sh", "curl", "wget", "nc", "netcat"}
+            code_lower = code.lower()
+            for cmd in forbidden_cmds:
+                # 简单词边界检查，避免误伤合法变量名
+                if re.search(rf"\b{cmd}\b", code_lower):
+                    raise HTTPException(400, f"Shell 组件禁止使用命令: {cmd}")
+            # 3. 长度限制
+            if len(code) > 10000:
+                raise HTTPException(400, "Shell 组件代码超过 10000 字符限制")
         elif c.type == "python":
-            # 使用 RestrictedPython 编译时沙箱 — 比正则/AST 白名单更可靠
+            # 1. 使用 RestrictedPython 编译时沙箱
             from restrictedpython import compile_restricted
 
-            result = compile_restricted(code, "<inline>", "exec")
-            if result.errors:
-                raise HTTPException(400, f"Python 代码包含危险操作: {', '.join(str(e) for e in result.errors)}")
+            rp_result = compile_restricted(code, "<inline>", "exec")
+            if rp_result.errors:
+                raise HTTPException(400, f"Python 代码包含危险操作: {', '.join(str(e) for e in rp_result.errors)}")
+            # 2. AST 运行时检查：禁止 os.system / subprocess / socket 等调用
+            try:
+                tree = ast.parse(code)
+            except SyntaxError as e:
+                raise HTTPException(400, f"Python 语法错误: {e}")
+            _validate_python_ast(tree)
 
         if c.type == "python":
             with tempfile.NamedTemporaryFile(
@@ -771,8 +816,15 @@ def run_component(
             finally:
                 os.unlink(tmp)
         else:
+            # Shell: 用 shlex 解析为参数列表，shell=False 执行（更安全）
+            try:
+                args = shlex.split(code)
+            except ValueError as e:
+                raise HTTPException(400, f"Shell 命令解析失败: {e}")
+            if not args:
+                raise HTTPException(400, "Shell 组件代码为空")
             result = subprocess.run(
-                ["bash", "-c", code], capture_output=True, text=True, timeout=120
+                args, capture_output=True, text=True, timeout=120
             )
         duration_ms = int((time.time() - start) * 1000)
         log = (result.stdout + result.stderr).strip() or "(无输出)"
