@@ -19,6 +19,7 @@ from app.core.database import engine, Base, SessionLocal
 from app.core.config import settings
 from app.core.security import hash_password
 from app.core.migrations import run_all_migrations
+from app.core.auto_migrate import auto_migrate
 from app.api import auth, datasources, sync_tasks, dashboard, ds_proxy, notifications, component, workflow, system, metadata, project
 from app.models.component import ComponentHistory  # noqa: F401
 from app.models.component_folder import ComponentFolder  # noqa: F401
@@ -47,7 +48,8 @@ except Exception as e:
 # Alembic 不可用时降级到 create_all（仅开发环境）
 if not alembic_ok:
     Base.metadata.create_all(bind=engine)
-run_all_migrations()
+auto_migrate()  # 自动创建缺失的表/列
+run_all_migrations()  # 复杂数据迁移（如 datax_to_component）
 
 
 # ─── 种子数据：4 个内置角色 + 权限列表 ──────────────────────────────────────
