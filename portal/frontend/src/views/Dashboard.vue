@@ -107,7 +107,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { useUserStore } from '../stores/user'
 import { getDashboardStats, getDSInstances } from '../api'
 import {
@@ -203,8 +203,10 @@ function formatRunTime(t: string) {
   return d.format('MM-DD HH:mm')
 }
 
+let timeTimer: ReturnType<typeof setInterval> | null = null
+
 onMounted(async () => {
-  setInterval(() => { currentTime.value = new Date().toLocaleString('zh-CN') }, 1000)
+  timeTimer = setInterval(() => { currentTime.value = new Date().toLocaleString('zh-CN') }, 1000)
   try {
     const res: any = await getDashboardStats()
     Object.assign(stats, res)
@@ -213,6 +215,13 @@ onMounted(async () => {
     const res: any = await getDSInstances({ pageSize: 5, pageNo: 1 })
     recentRuns.value = res?.totalList?.slice(0, 5) || []
   } catch {}
+})
+
+onUnmounted(() => {
+  if (timeTimer) {
+    clearInterval(timeTimer)
+    timeTimer = null
+  }
 })
 </script>
 

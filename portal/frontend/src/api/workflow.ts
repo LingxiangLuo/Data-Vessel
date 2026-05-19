@@ -1,0 +1,15 @@
+import { api } from './client'
+
+export const getWorkflows = (params?: any) => api.get('/workflows', { params })
+export const getWorkflow = (id: number) => api.get(`/workflows/${id}`)
+export const createWorkflow = (data: any) => api.post('/workflows', data)
+export const updateWorkflow = (id: number, data: any) => api.put(`/workflows/${id}`, data)
+export const deleteWorkflow = (id: number) => api.delete(`/workflows/${id}`)
+export const testWorkflow = (id: number) => api.post(`/workflows/${id}/test`)
+export const publishWorkflow = (id: number) => api.post(`/workflows/${id}/publish`)
+export const offlineWorkflow = (id: number) => api.post(`/workflows/${id}/offline`)
+export const runWorkflow = (id: number) => api.post(`/workflows/${id}/run`)
+export const scheduleWorkflowOnline = (id: number) => api.post(`/workflows/${id}/schedule/online`)
+export const scheduleWorkflowOffline = (id: number) => api.post(`/workflows/${id}/schedule/offline`)
+export const cronPreview = (cron_expression: string) => api.post('/workflows/cron-preview', { cron_expression })
+export const getScheduledWorkflows = () => api.get('/workflows/scheduled')
