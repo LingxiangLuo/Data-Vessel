@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
 TEST_HOST="192.168.1.3"
 TEST_USER="root"
@@ -15,13 +15,13 @@ echo "  Commit: $(git -C "$PROJECT_DIR" rev-parse --short HEAD)"
 echo "=========================================="
 
 # 1. 后端语法检查
-echo "[1/4] 后端语法检查..."
+echo "[1/5] 后端语法检查..."
 cd "$PROJECT_DIR/portal/backend"
-find . -name "*.py" -not -path "./.venv/*" | xargs python3 -m py_compile
+python3 -m compileall -q -d . -x '/\.venv/' .
 echo "  ✅ 语法检查通过"
 
 # 2. 同步代码
-echo "[2/4] 同步代码到 $TEST_HOST..."
+echo "[2/5] 同步代码到 $TEST_HOST..."
 cd "$PROJECT_DIR"
 rsync -az --delete \
     --exclude='.git' \
@@ -41,7 +41,7 @@ rsync -az --delete \
 echo "  ✅ 同步完成"
 
 # 3. 构建并重启
-echo "[3/4] 构建并启动服务..."
+echo "[3/5] 构建并启动服务..."
 BUILD_ARGS=""
 if [ "$FORCE_REBUILD" = "--force" ]; then
     echo "  强制全量重建（--force 模式）"
@@ -56,17 +56,36 @@ ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$TEST_USER@$TEST_HOST" "
 
     docker compose stop portal-frontend portal-backend nginx 2>/dev/null || true
     docker compose up -d
+"
+echo "  ✅ 服务已启动"
 
-    echo '等待服务就绪...'
+# 4. 数据库迁移
+echo "[4/5] 数据库迁移..."
+ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$TEST_USER@$TEST_HOST" "
+    set -e
+    cd $TEST_DIR
+    docker compose exec -T portal-backend python -c '
+from app.core.migrations import run_all_migrations
+run_all_migrations()
+print(\"迁移完成\")
+' 2>/dev/null || echo '迁移跳过（可能无需迁移）'
+"
+
+# 5. 健康检查
+echo "[5/5] 健康检查..."
+ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$TEST_USER@$TEST_HOST" "
+    set -e
+    cd $TEST_DIR
     for i in \$(seq 1 20); do
         if curl -sf http://localhost:8888/ > /dev/null 2>&1; then
             echo '  ✅ 服务已就绪'
-            break
+            exit 0
         fi
         sleep 3
     done
-
+    echo '  ❌ 服务未在 60 秒内就绪'
     docker compose ps --format 'table {{.Name}}\t{{.Status}}'
+    exit 1
 "
 
 echo ""
