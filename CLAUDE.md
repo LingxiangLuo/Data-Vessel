@@ -105,7 +105,30 @@ cd ~/actions-runner && ./svc.sh start
 cd ~/actions-runner && ./svc.sh stop
 ```
 
-SSH 密钥：`~/.ssh/test_server_key`（已部署到 192.168.1.3）
+## 测试服务器连接
+
+| 项目 | 值 |
+|------|-----|
+| IP | `192.168.1.3` |
+| 用户名 | `root` |
+| 认证方式 | SSH 密钥（Ed25519） |
+| 私钥文件 | `~/Desktop/test-server-key` |
+
+```bash
+# SSH 连接
+ssh -i ~/Desktop/test-server-key root@192.168.1.3
+
+# 常用容器操作
+ssh -i ~/Desktop/test-server-key root@192.168.1.3 'docker ps'
+ssh -i ~/Desktop/test-server-key root@192.168.1.3 'docker compose restart portal-backend'
+ssh -i ~/Desktop/test-server-key root@192.168.1.3 'docker logs -f dmp-portal-backend'
+```
+
+| 服务 | 内网地址 |
+|------|---------|
+| Portal Backend API | `http://172.20.0.7:8000` |
+| Nginx 前端 | `http://192.168.1.3` |
+| DolphinScheduler | `http://192.168.1.3:12345/dolphinscheduler` |
 
 ## 代码审查
 

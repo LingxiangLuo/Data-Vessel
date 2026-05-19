@@ -1,4 +1,4 @@
-# Data Platform MVP · 数据中台
+# 数舟 DataVessel · 轻量级一站式数据中台
 
 <p align="center">
   <img src="https://img.shields.io/badge/Vue-3-4FC08D?logo=vue.js" alt="Vue 3">

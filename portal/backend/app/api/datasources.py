@@ -174,10 +174,17 @@ def delete_datasource(
                 detail=f"数据源被组件「{comp.name}」引用，请先解除引用",
             )
 
-    # 同步任务引用
+    # 同步任务引用（仅检查仍存在对应组件或工作流的记录，排除孤儿记录）
+    from app.models.workflow import Workflow
     sync_ref = (
         db.query(SyncTask)
-        .filter((SyncTask.source_id == ds_id) | (SyncTask.target_id == ds_id))
+        .outerjoin(Component, SyncTask.component_id == Component.id)
+        .outerjoin(Workflow, SyncTask.ds_workflow_id == Workflow.id)
+        .filter(
+            ((SyncTask.source_id == ds_id) | (SyncTask.target_id == ds_id)),
+            ((SyncTask.component_id.isnot(None)) & (Component.id.isnot(None)))
+            | ((SyncTask.ds_workflow_id.isnot(None)) & (Workflow.id.isnot(None))),
+        )
         .first()
     )
     if sync_ref:
