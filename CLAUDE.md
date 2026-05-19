@@ -26,7 +26,7 @@ cd portal/frontend && npx vite build
 cd portal/backend && uvicorn main:app --reload --port 8000
 
 # 后端语法检查
-cd portal/backend && find . -name "*.py" -not -path "./.venv/*" | xargs python3 -m py_compile
+cd portal/backend && python3 -m compileall -q -d . -x '/\.venv/' .
 
 # 手动部署到测试服务器（任意分支均可）
 bash scripts/deploy-to-test.sh
@@ -53,7 +53,8 @@ git checkout main && git pull origin main
 git checkout -b feat/xxx
 
 # 2. 本地测试
-cd portal/backend && rtk pytest tests/ -v --ignore=tests/test_auth_rate_limit.py
+cd portal/backend && python3 -m compileall -q -d . -x '/\.venv/' .
+cd portal/backend && ruff check .
 cd portal/frontend && npm run build
 
 # 3. 代码审查 — 每次非平凡修改后主动触发 quick-code-reviewer
@@ -71,20 +72,7 @@ git branch -d feat/xxx
 
 ## CI/CD
 
-| 文件 | 触发 | 运行环境 | 做什么 |
-|------|------|----------|--------|
-| `sync-upstream.yml` | 每 30 分钟 | ubuntu-latest | upstream → main → dev 自动同步 |
-| `deploy-test.yml` | **手动触发**（workflow_dispatch） | self-hosted (Mac) | rsync + docker compose 部署 |
-| `pr-check.yml` | PR → dev | self-hosted (Mac) | 前端 tsc + build，后端语法检查 |
-
-Self-hosted runner 在开发 Mac 上（launchd 开机自启）。
-
-```bash
-# Runner 管理
-cd ~/actions-runner && ./svc.sh status
-cd ~/actions-runner && ./svc.sh start
-cd ~/actions-runner && ./svc.sh stop
-```
+当前无自动化 CI/CD，部署通过本地脚本手动执行到测试服务器。
 
 ## 测试服务器连接
 
@@ -93,16 +81,16 @@ cd ~/actions-runner && ./svc.sh stop
 | IP | `192.168.1.3` |
 | 用户名 | `root` |
 | 认证方式 | SSH 密钥（Ed25519） |
-| 私钥文件 | `~/Desktop/test-server-key` |
+| 私钥文件 | `~/.ssh/test_server_key` |
 
 ```bash
 # SSH 连接
-ssh -i ~/Desktop/test-server-key root@192.168.1.3
+ssh -i ~/.ssh/test_server_key root@192.168.1.3
 
 # 常用容器操作
-ssh -i ~/Desktop/test-server-key root@192.168.1.3 'docker ps'
-ssh -i ~/Desktop/test-server-key root@192.168.1.3 'docker compose restart portal-backend'
-ssh -i ~/Desktop/test-server-key root@192.168.1.3 'docker logs -f dmp-portal-backend'
+ssh -i ~/.ssh/test_server_key root@192.168.1.3 'docker ps'
+ssh -i ~/.ssh/test_server_key root@192.168.1.3 'docker compose restart dmp-portal-api'
+ssh -i ~/.ssh/test_server_key root@192.168.1.3 'docker logs -f dmp-portal-api'
 ```
 
 | 服务 | 内网地址 |
