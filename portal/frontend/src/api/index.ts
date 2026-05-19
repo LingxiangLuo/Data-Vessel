@@ -106,6 +106,7 @@ export const complementDSWorkflow = (code: number, startDate: string, endDate: s
 export const getDSInstances = (params?: any) => api.get('/ds/instances', { params })
 export const getDSCalendar = (days?: number) => api.get('/ds/instances/calendar', { params: { days } })
 export const getDSInstanceTasks = (instanceId: number) => api.get(`/ds/instances/${instanceId}/tasks`)
+export const getDSInstanceDetail = (instanceId: number) => api.get(`/ds/instances/${instanceId}/detail`)
 export const getDSTaskLog = (taskId: number) => api.get(`/ds/tasks/${taskId}/log`)
 export const rerunDSInstance = (instanceId: number) => api.post(`/ds/instances/${instanceId}/rerun`)
 export const getDSMonitor = () => api.get('/ds/monitor')

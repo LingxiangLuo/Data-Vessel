@@ -30,6 +30,7 @@ from app.models.sys_config import SysConfig  # noqa: F401
 from app.models.sys_notify_channel import SysNotifyChannel  # noqa: F401
 from app.models.dqc_rule import DqcRule  # noqa: F401
 from app.models.dqc_check import DqcCheck  # noqa: F401
+from app.models.dqc_report import DqcReport, DqcReportHistory  # noqa: F401
 
 # 数据库迁移：优先使用 Alembic
 import subprocess
@@ -266,6 +267,13 @@ app.include_router(admin.router, prefix="/api")
 
 from app.api import dqc_rules
 app.include_router(dqc_rules.router, prefix="/api")
+
+from app.api import dqc_reports
+app.include_router(dqc_reports.router, prefix="/api")
+
+# 启动 DQC 报告定时调度器
+from app.core.dqc_scheduler import start_scheduler
+start_scheduler()
 
 
 @app.get("/api/health")

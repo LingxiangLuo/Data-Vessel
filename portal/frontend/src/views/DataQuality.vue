@@ -209,6 +209,40 @@
             </a-form-item>
           </a-col>
         </a-row>
+        <a-row v-if="['diff_percent', 'diff_count'].includes(form.rule_type)" :gutter="16">
+          <a-col :span="12">
+            <a-form-item label="对比基准" required>
+              <a-select v-model="extraForm.compare_with">
+                <a-option value="prev_day">前一天</a-option>
+                <a-option value="prev_week">上周同一天</a-option>
+              </a-select>
+            </a-form-item>
+          </a-col>
+          <a-col :span="12">
+            <a-form-item label="时间字段" required>
+              <a-input v-model="extraForm.time_column" placeholder="例如：dt, create_time" />
+            </a-form-item>
+          </a-col>
+        </a-row>
+        <a-form-item v-if="form.rule_type === 'value_enum'" label="允许值列表" required>
+          <a-input v-model="extraForm.enum_values" placeholder="英文逗号分隔，例如：A,B,C" />
+        </a-form-item>
+        <a-form-item v-if="form.rule_type === 'format_check'" label="格式类型" required>
+          <a-select v-model="extraForm.format_type">
+            <a-option value="date">日期格式 (YYYY-MM-DD)</a-option>
+            <a-option value="datetime">日期时间 (YYYY-MM-DD HH:mm:ss)</a-option>
+            <a-option value="email">邮箱格式</a-option>
+            <a-option value="phone">手机号格式</a-option>
+            <a-option value="idcard">身份证号</a-option>
+            <a-option value="custom">自定义正则</a-option>
+          </a-select>
+        </a-form-item>
+        <a-form-item v-if="form.rule_type === 'format_check' && extraForm.format_type === 'custom'" label="自定义正则" required>
+          <a-input v-model="extraForm.format_pattern" placeholder="例如：^[0-9]{4}$" />
+        </a-form-item>
+        <a-form-item v-if="form.rule_type === 'group_by_count'" label="分组字段" required>
+          <a-input v-model="extraForm.group_by_column" placeholder="例如：city" />
+        </a-form-item>
 
         <a-row :gutter="16">
           <a-col :span="12">
@@ -248,7 +282,7 @@
       :footer="false"
       :unmount-on-close="true"
     >
-      <a-table :data="history" :bordered="false" :pagination="false" stripe>
+      <a-table :data="history" :bordered="false" :pagination="false" stripe row-key="id">
         <template #columns>
           <a-table-column title="检查时间" data-index="checked_at" :width="180" />
           <a-table-column title="实际值" data-index="actual_value" :width="120" />
@@ -257,6 +291,14 @@
             <template #cell="{ record }">
               <a-tag v-if="record.passed" size="small" color="green">通过</a-tag>
               <a-tag v-else size="small" color="red">失败</a-tag>
+            </template>
+          </a-table-column>
+          <a-table-column title="失败采样" :width="120">
+            <template #cell="{ record }">
+              <a-button v-if="record.sample_data?.length" type="text" size="mini" @click="toggleSample(record.id)">
+                {{ expandedSamples[record.id] ? '收起' : '查看' }} ({{ record.sample_data.length }})
+              </a-button>
+              <span v-else class="text-muted">—</span>
             </template>
           </a-table-column>
           <a-table-column title="错误信息" data-index="error_msg">
@@ -272,6 +314,24 @@
           </div>
         </template>
       </a-table>
+      <!-- 采样数据展开区 -->
+      <div v-for="record in history.filter(h => expandedSamples[h.id])" :key="'sample-' + record.id" class="sample-panel">
+        <div class="sample-panel__title">{{ record.checked_at }} — 失败采样（{{ record.sample_data.length }} 条）</div>
+        <div class="sample-panel__scroll">
+          <table class="sample-table">
+            <thead>
+              <tr>
+                <th v-for="col in Object.keys(record.sample_data[0])" :key="col">{{ col }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(row, idx) in record.sample_data" :key="idx">
+                <td v-for="col in Object.keys(record.sample_data[0])" :key="col">{{ row[col] }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
     </a-modal>
   </div>
 </template>
@@ -320,6 +380,7 @@ const modalVisible = ref(false)
 const historyVisible = ref(false)
 const editingId = ref<number | null>(null)
 const history = ref<any[]>([])
+const expandedSamples = ref<Record<number, boolean>>({})
 
 const form = ref({
   name: '',
@@ -336,13 +397,19 @@ const form = ref({
   description: '',
 })
 
-const extraForm = ref({
+const extraForm = ref<Record<string, any>>({
   custom_sql: '',
   pattern: '',
   min_value: '',
   max_value: '',
   length_op: 'eq',
   length_value: 0,
+  compare_with: 'prev_day',
+  time_column: '',
+  enum_values: '',
+  format_type: 'date',
+  format_pattern: '',
+  group_by_column: '',
 })
 
 const ruleTypeOptions = [
@@ -361,6 +428,12 @@ const ruleTypeOptions = [
   { value: 'regex_match_percent', label: '正则匹配率(%)', needsCol: true },
   { value: 'length_check', label: '长度检查', needsCol: true },
   { value: 'value_range', label: '值范围检查', needsCol: true },
+  { value: 'table_size', label: '表大小(字节)', needsCol: false },
+  { value: 'group_by_count', label: '分组行数', needsCol: true },
+  { value: 'value_enum', label: '枚举值检查', needsCol: true },
+  { value: 'format_check', label: '格式检查', needsCol: true },
+  { value: 'diff_percent', label: '波动率(%)', needsCol: false },
+  { value: 'diff_count', label: '波动量', needsCol: false },
 ]
 
 const operatorOptions = [
@@ -390,6 +463,12 @@ function ruleTypeLabel(t: string) {
     regex_match_percent: '正则匹配率(%)',
     length_check: '长度检查',
     value_range: '值范围检查',
+    table_size: '表大小(字节)',
+    group_by_count: '分组行数',
+    value_enum: '枚举值检查',
+    format_check: '格式检查',
+    diff_percent: '波动率(%)',
+    diff_count: '波动量',
   }
   return m[t] || t
 }
@@ -485,7 +564,7 @@ function openCreate() {
     notify_channel_ids: [],
     description: '',
   }
-  extraForm.value = { custom_sql: '', pattern: '', min_value: '', max_value: '', length_op: 'eq', length_value: 0 }
+  extraForm.value = { custom_sql: '', pattern: '', min_value: '', max_value: '', length_op: 'eq', length_value: 0, compare_with: 'prev_day', time_column: '', enum_values: '', format_type: 'date', format_pattern: '', group_by_column: '' }
   tables.value = []
   columns.value = []
   modalVisible.value = true
@@ -507,7 +586,7 @@ function openEdit(r: Rule) {
     notify_channel_ids: r.notify_channel_ids || [],
     description: r.description || '',
   }
-  extraForm.value = { custom_sql: '', pattern: '', min_value: '', max_value: '', length_op: 'eq', length_value: 0 }
+  extraForm.value = { custom_sql: '', pattern: '', min_value: '', max_value: '', length_op: 'eq', length_value: 0, compare_with: 'prev_day', time_column: '', enum_values: '', format_type: 'date', format_pattern: '', group_by_column: '' }
   if (r.extra_config) {
     extraForm.value.custom_sql = r.extra_config.custom_sql || ''
     extraForm.value.pattern = r.extra_config.pattern || ''
@@ -515,6 +594,12 @@ function openEdit(r: Rule) {
     extraForm.value.max_value = r.extra_config.max_value !== undefined ? String(r.extra_config.max_value) : ''
     extraForm.value.length_op = r.extra_config.length_op || 'eq'
     extraForm.value.length_value = r.extra_config.length_value || 0
+    extraForm.value.compare_with = r.extra_config.compare_with || 'prev_day'
+    extraForm.value.time_column = r.extra_config.time_column || ''
+    extraForm.value.enum_values = r.extra_config.enum_values ? r.extra_config.enum_values.join(',') : ''
+    extraForm.value.format_type = r.extra_config.format_type || 'date'
+    extraForm.value.format_pattern = r.extra_config.format_pattern || ''
+    extraForm.value.group_by_column = r.extra_config.group_by_column || ''
   }
   tables.value = []
   columns.value = []
@@ -554,6 +639,25 @@ async function handleSave() {
   if (form.value.rule_type === 'length_check') {
     extra.length_op = extraForm.value.length_op
     extra.length_value = extraForm.value.length_value
+  }
+  if (['diff_percent', 'diff_count'].includes(form.value.rule_type)) {
+    extra.compare_with = extraForm.value.compare_with || 'prev_day'
+    extra.time_column = extraForm.value.time_column || ''
+  }
+  if (form.value.rule_type === 'value_enum') {
+    if (!extraForm.value.enum_values?.trim()) { Message.warning('请填写允许值列表'); return }
+    extra.enum_values = extraForm.value.enum_values.split(',').map((s: string) => s.trim())
+  }
+  if (form.value.rule_type === 'format_check') {
+    extra.format_type = extraForm.value.format_type || 'date'
+    if (extraForm.value.format_type === 'custom') {
+      if (!extraForm.value.format_pattern?.trim()) { Message.warning('请填写自定义正则'); return }
+      extra.format_pattern = extraForm.value.format_pattern.trim()
+    }
+  }
+  if (form.value.rule_type === 'group_by_count') {
+    if (!extraForm.value.group_by_column?.trim()) { Message.warning('请填写分组字段'); return }
+    extra.group_by_column = extraForm.value.group_by_column.trim()
   }
 
   const payload = {
@@ -609,10 +713,15 @@ async function handleCheck(r: Rule) {
 
 async function openHistory(r: Rule) {
   historyVisible.value = true
+  expandedSamples.value = {}
   try {
     const res: any = await getDqcRuleHistory(r.id, 50)
     history.value = res?.items || []
   } catch { history.value = [] }
+}
+
+function toggleSample(id: number) {
+  expandedSamples.value[id] = !expandedSamples.value[id]
 }
 
 function handleDelete(r: Rule) {
@@ -670,4 +779,12 @@ onMounted(() => {
 .table-col-cell { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 
 :deep(.arco-table-th) { background: #FAFBFC !important; }
+
+.sample-panel { margin-top: 12px; border: 1px solid #e5e7eb; border-radius: 6px; padding: 12px; background: #fafbfc; }
+.sample-panel__title { font-size: 12px; font-weight: 500; color: #4e5969; margin-bottom: 8px; }
+.sample-panel__scroll { overflow-x: auto; }
+.sample-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.sample-table th, .sample-table td { padding: 6px 10px; text-align: left; border: 1px solid #e5e7eb; white-space: nowrap; }
+.sample-table th { background: #f2f3f5; font-weight: 500; color: #4e5969; }
+.sample-table td { color: #1d2129; }
 </style>

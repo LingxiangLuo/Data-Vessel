@@ -718,6 +718,120 @@ async def run_workflow(
     }
 
 
+# ===== 实例详情（含 DQC 质量检查结果） =====
+
+@router.get("/{wf_id}/instances/{instance_id}")
+async def get_instance_detail(
+    wf_id: int,
+    instance_id: int,
+    db: Session = Depends(get_db),
+    current_user: SysUser = Depends(get_current_user),
+):
+    """获取工作流实例详情，包含任务列表和 DQC 质量检查结果。"""
+    w = _get_or_404(db, wf_id)
+    if not check_resource_permission(db, current_user, "workflow", wf_id, "read"):
+        raise HTTPException(status_code=404, detail="工作流不存在")
+
+    ds = get_ds_client()
+    pc = await ds.project_code()
+    if not pc:
+        raise HTTPException(status_code=502, detail="DS 服务不可用")
+
+    # 获取流程实例详情
+    inst = await ds.get(f"/projects/{pc}/process-instances/{instance_id}")
+    if not inst:
+        raise HTTPException(status_code=404, detail="实例不存在")
+
+    # 获取任务实例列表
+    tasks = await ds.get_task_instances(instance_id)
+
+    # 识别 DQC 任务并关联质量检查结果
+    from app.models.dqc_rule import DqcRule
+    from app.models.dqc_check import DqcCheck
+
+    dqc_results = []
+    for task in tasks:
+        name = task.get("name", "")
+        if not name.startswith("DQC:"):
+            continue
+        # 提取规则名（去掉 DQC: 前缀和 [强]/[弱] 后缀）
+        rule_name = name[4:].replace("[强]", "").replace("[弱]", "").strip()
+        if rule_name.endswith("..."):
+            rule_name = rule_name[:-3]
+
+        # 查找规则（按名称模糊匹配，优先匹配同一数据源下的）
+        rule = (
+            db.query(DqcRule)
+            .filter(DqcRule.name.contains(rule_name))
+            .order_by(DqcRule.id.desc())
+            .first()
+        )
+        if not rule:
+            continue
+
+        # 查找对应的检查记录（按时间窗口匹配：实例执行前后 5 分钟）
+        start_time = task.get("startTime")
+        if start_time:
+            from datetime import datetime, timedelta
+            try:
+                task_dt = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
+                check = (
+                    db.query(DqcCheck)
+                    .filter(
+                        DqcCheck.rule_id == rule.id,
+                        DqcCheck.checked_at >= task_dt - timedelta(minutes=5),
+                        DqcCheck.checked_at <= task_dt + timedelta(minutes=5),
+                    )
+                    .order_by(DqcCheck.id.desc())
+                    .first()
+                )
+            except Exception:
+                check = None
+        else:
+            check = (
+                db.query(DqcCheck)
+                .filter(DqcCheck.rule_id == rule.id)
+                .order_by(DqcCheck.id.desc())
+                .first()
+            )
+
+        dqc_results.append({
+            "task_name": name,
+            "task_state": task.get("state"),
+            "rule_id": rule.id,
+            "rule_name": rule.name,
+            "is_strong": rule.is_strong,
+            "passed": check.passed if check else None,
+            "actual_value": check.actual_value if check else None,
+            "expected_value": check.expected_value if check else None,
+            "sample_data": check.sample_data if check else None,
+            "checked_at": str(check.checked_at) if check and check.checked_at else None,
+        })
+
+    return {
+        "instance": {
+            "id": inst.get("id"),
+            "state": inst.get("state"),
+            "start_time": inst.get("startTime"),
+            "end_time": inst.get("endTime"),
+            "duration": inst.get("duration"),
+        },
+        "tasks": [
+            {
+                "id": t.get("id"),
+                "name": t.get("name"),
+                "state": t.get("state"),
+                "type": t.get("taskType"),
+                "start_time": t.get("startTime"),
+                "end_time": t.get("endTime"),
+                "duration": t.get("duration"),
+            }
+            for t in tasks
+        ],
+        "dqc_results": dqc_results,
+    }
+
+
 # ===== 调度开关 =====
 @router.post("/{wf_id}/schedule/online")
 async def schedule_online(

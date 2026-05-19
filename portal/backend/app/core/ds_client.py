@@ -298,6 +298,21 @@ class DSClient:
             "startParams": "",
         })
 
+    async def get_task_instances(self, process_instance_id: int, page_size: int = 100) -> list:
+        """获取指定流程实例的任务实例列表"""
+        pc = await self._discover_project()
+        if not pc:
+            return []
+        data = await self.get(
+            f"/projects/{pc}/task-instances",
+            params={
+                "processInstanceId": process_instance_id,
+                "pageNo": 1,
+                "pageSize": page_size,
+            },
+        )
+        return (data or {}).get("totalList", [])
+
     async def close(self):
         await self._client.aclose()
 

@@ -8,7 +8,7 @@ from sqlalchemy import func, desc
 from app.core.database import get_db
 from app.core.security import get_current_user, verify_service_token, get_service_user
 from app.core.permissions import require_permission, check_resource_permission
-from app.core.dqc_engine import execute_rule
+from app.core.dqc_engine import execute_rule, sample_failures
 from app.models.dqc_rule import DqcRule
 from app.models.dqc_check import DqcCheck
 from app.models.datasource import DataSource
@@ -328,6 +328,14 @@ async def run_check(
 
     result = execute_rule(rule, ds)
 
+    # 失败时执行采样
+    sample_data = None
+    if not result["passed"]:
+        try:
+            sample_data = sample_failures(rule, ds)
+        except Exception:
+            pass
+
     # 保存检查记录
     check = DqcCheck(
         rule_id=rule.id,
@@ -335,6 +343,7 @@ async def run_check(
         expected_value=f"{rule.operator} {rule.threshold}{f' ~ {rule.threshold_max}' if rule.threshold_max else ''}",
         passed=result["passed"],
         error_msg=result.get("error_msg"),
+        sample_data=sample_data,
     )
     db.add(check)
     db.commit()
@@ -349,6 +358,7 @@ async def run_check(
         "passed": result["passed"],
         "error_msg": result.get("error_msg"),
         "check_id": check.id,
+        "sample_data": sample_data,
     }
 
 
@@ -378,6 +388,7 @@ def rule_history(
                 "expected_value": c.expected_value,
                 "passed": c.passed,
                 "error_msg": c.error_msg,
+                "sample_data": c.sample_data,
                 "checked_at": str(c.checked_at) if c.checked_at else None,
             }
             for c in checks
@@ -410,6 +421,7 @@ def list_checks(
                 "expected_value": c.expected_value,
                 "passed": c.passed,
                 "error_msg": c.error_msg,
+                "sample_data": c.sample_data,
                 "checked_at": str(c.checked_at) if c.checked_at else None,
             }
             for c in checks
