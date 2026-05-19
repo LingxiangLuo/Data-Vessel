@@ -31,8 +31,11 @@ cd portal/backend && find . -name "*.py" -not -path "./.venv/*" | xargs python3 
 # 手动部署到测试服务器（任意分支均可）
 bash scripts/deploy-to-test.sh
 
-# 强制全量重建（依赖变化时）
-bash scripts/deploy-to-test.sh --force
+# 常用参数
+bash scripts/deploy-to-test.sh --backend-only   # 仅部署后端
+bash scripts/deploy-to-test.sh --frontend-only  # 仅部署前端
+bash scripts/deploy-to-test.sh --skip-check     # 跳过语法检查
+bash scripts/deploy-to-test.sh --force          # 强制全量重建（无缓存）
 ```
 
 ## 分支模型
@@ -139,7 +142,9 @@ ssh -i ~/Desktop/test-server-key root@192.168.1.3 'docker logs -f dmp-portal-bac
 
 ## 后端约定
 
-- 数据库 migration 写在 `main.py` 的 `_migrate_*()` 函数里（`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`），不用 Alembic
+- **新增表/列**：`app/core/auto_migrate.py` 启动时自动检测并创建（`Base.metadata.create_all()` + `ALTER TABLE ADD COLUMN`）
+- **复杂迁移**（列类型变更、数据迁移、索引变更）：`app/core/migrations.py` 中手写 migration 函数
+- **启动顺序**：后端容器启动时依次调用 `alembic upgrade head` → `auto_migrate()` → `run_all_migrations()`
 - 新增 API 端点后需在 `main.py` 注册路由
 - 权限控制：敏感端点叠加 `Depends(require_permission("xxx:yyy"))`，不改 `get_current_user`
 
