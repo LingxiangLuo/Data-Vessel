@@ -21,6 +21,33 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["认证"])
 
+# CSRF token 缓存（内存 + Redis 回退）
+_csrf_tokens: dict[str, float] = {}
+
+
+def _generate_csrf_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def _set_csrf_cookie(response: Response) -> str:
+    token = _generate_csrf_token()
+    response.set_cookie(
+        key="csrf_token",
+        value=token,
+        httponly=False,
+        samesite="strict",
+        secure=settings.COOKIE_SECURE,
+        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+    )
+    return token
+
+
+@router.get("/csrf")
+def get_csrf_token(response: Response):
+    """获取 CSRF token（用于非登录状态的预检请求）"""
+    token = _set_csrf_cookie(response)
+    return {"csrf_token": token}
+
 # 登录暴力破解防护：按 IP 计数，优先用 Redis（多实例共享），不可用时降级内存
 _login_attempts: dict[str, list[float]] = defaultdict(list)
 _login_lock = Lock()
@@ -108,9 +135,9 @@ def _clear_login_attempts(ip: str, username: str = "") -> None:
             r.delete(f"user_attempts:{username}")
     else:
         with _login_lock:
-            _login_attempts.pop(f"login_attempts:{ip}", None)
+            _login_attempts.pop(ip, None)
             if username:
-                _user_login_attempts.pop(f"user_attempts:{username}", None)
+                _user_login_attempts.pop(username, None)
 
 
 class LoginRequest(BaseModel):
@@ -171,6 +198,8 @@ def login(req: LoginRequest, request: Request, response: Response, db: Session =
         secure=settings.COOKIE_SECURE,
         max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
     )
+    # 设置 CSRF token cookie（非 httponly，供前端读取）
+    csrf_token = _set_csrf_cookie(response)
     return LoginResponse(
         access_token=token,
         user={
@@ -195,6 +224,7 @@ def logout(response: Response, request: Request):
         from app.core.security import add_to_blacklist
         add_to_blacklist(token)
     response.delete_cookie(_COOKIE_NAME, httponly=True, samesite="lax")
+    response.delete_cookie("csrf_token", samesite="strict")
     return {"ok": True}
 
 
@@ -396,5 +426,7 @@ async def oauth_callback(
         secure=settings.COOKIE_SECURE,
         max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
     )
+    # 设置 CSRF token cookie
+    _set_csrf_cookie(response)
     response.delete_cookie("oauth_state", httponly=True, samesite="lax")
     return response

@@ -751,31 +751,12 @@ def run_component(
             if re.search(r"[;|&<>{}()$`\n\r]|&&|\|\|", code):
                 raise HTTPException(400, "Shell 组件禁止包含危险字符（; | & < > { } ( ) $ ` && || 换行）")
         elif c.type == "python":
-            # 禁止危险导入和函数（文本黑名单是尽力而为，长期应迁移到容器沙箱）
-            dangerous = [
-                "os", "sys", "subprocess", "socket", "importlib",
-                "builtins", "__builtins__", "ctypes", "pathlib",
-                "code", "codeop", "types", "inspect", "gc",
-                "traceback", "linecache", "tokenize", "pickle",
-                "marshal", "multiprocessing", "threading",
-            ]
-            dangerous_funcs = [
-                "eval", "exec", "compile", "open", "input",
-                "__import__", "getattr", "setattr", "delattr",
-                "breakpoint", "type",
-            ]
-            for mod in dangerous:
-                if re.search(rf"\bimport\s+{mod}\b|\bfrom\s+{mod}\b", code):
-                    raise HTTPException(400, f"Python 组件禁止导入危险模块: {mod}")
-            for fn in dangerous_funcs:
-                if re.search(rf"\b{fn}\s*\(", code):
-                    raise HTTPException(400, f"Python 组件禁止使用危险函数: {fn}")
-                # 阻止通过变量别名间接调用（如 x = open; x(...)）
-                if re.search(rf"\b{fn}\b\s*=", code):
-                    raise HTTPException(400, f"Python 组件禁止将危险函数赋值给变量: {fn}")
-            # 阻止通过 dunder 属性链反射逃逸（如 ().__class__.__base__.__subclasses__()）
-            if re.search(r"__\w+__", code):
-                raise HTTPException(400, "Python 组件禁止使用双下划线属性反射")
+            # 使用 RestrictedPython 编译时沙箱 — 比正则/AST 白名单更可靠
+            from restrictedpython import compile_restricted
+
+            result = compile_restricted(code, "<inline>", "exec")
+            if result.errors:
+                raise HTTPException(400, f"Python 代码包含危险操作: {', '.join(str(e) for e in result.errors)}")
 
         if c.type == "python":
             with tempfile.NamedTemporaryFile(
@@ -970,8 +951,9 @@ async def publish_component_as_workflow(
             from app.core.ds_client import get_ds_client
             try:
                 await get_ds_client().delete_process_definition(pd_code)
-            except Exception:
-                pass
+            except Exception as cleanup_err:
+                import logging
+                logging.getLogger(__name__).warning("DS cleanup failed after publish error: %s", cleanup_err)
         raise HTTPException(status_code=502, detail=f"DS 同步失败：{e}")
 
     db.commit()
@@ -1177,8 +1159,17 @@ from datetime import datetime, timezone
 LOCK_TTL = 300  # 5 分钟
 LOCK_HEARTBEAT_INTERVAL = 60  # 心跳间隔（前端应小于此值）
 
+_redis_client = None
+
 
 def _get_redis():
+    global _redis_client
+    if _redis_client is not None:
+        try:
+            _redis_client.ping()
+            return _redis_client
+        except Exception:
+            _redis_client = None
     try:
         import redis, os
         from app.core.config import settings
@@ -1194,6 +1185,7 @@ def _get_redis():
                     url = f"{scheme}://:{password}@{rest}"
                 r = redis.from_url(url, socket_connect_timeout=1, decode_responses=True)
                 r.ping()
+                _redis_client = r
                 return r
             except Exception:
                 continue

@@ -9,6 +9,7 @@ from app.core.database import get_db
 from app.core.security import get_current_user
 from app.core.permissions import get_accessible_ids, check_resource_permission, require_permission
 from app.core.ds_client import get_ds_client
+from app.core.encrypt import decrypt_password
 from app.core.dsl_translator import translate_workflow, translate_workflow_dag
 from app.models.workflow import Workflow
 from app.models.component import Component
@@ -105,8 +106,8 @@ def _serialize(w: Workflow, db: Session) -> dict:
             cron_expr = cron_expr.replace('?', '*')
             cron = croniter(cron_expr, datetime.now())
             next_fire_time = str(cron.get_next(datetime))
-        except Exception:
-            pass
+        except Exception as e:
+            logging.getLogger(__name__).warning("cron parse error for workflow %s: %s", w.id, e)
     # 把 component type 补进 dag 节点，前端渲染节点颜色/样式依赖此字段
     dag = w.dag_json
     if dag and dag.get("nodes"):
@@ -185,16 +186,52 @@ async def _sync_to_ds(db: Session, w: Workflow) -> tuple:
 
     comps = db.query(Component).filter(Component.id.in_(comp_ids)).all()
     comp_map = {c.id: c for c in comps}
-    # 数据源映射 (SQL 组件需要)
+    # 数据源映射 (SQL 组件 + DataX 组件需要)
     ds_ids = set()
     for c in comps:
         cfg = c.config_json or {}
         if cfg.get("datasource_id"):
             ds_ids.add(cfg["datasource_id"])
+        if c.type == "datax":
+            if cfg.get("source_id"):
+                ds_ids.add(cfg["source_id"])
+            if cfg.get("target_id"):
+                ds_ids.add(cfg["target_id"])
     datasource_map = {}
     if ds_ids:
         dss = db.query(DataSource).filter(DataSource.id.in_(list(ds_ids))).all()
         datasource_map = {d.id: d for d in dss}
+
+    # === 同步数据源到 DS ===
+    ds = get_ds_client()
+    for ds_obj in datasource_map.values():
+        if ds_obj.ds_datasource_id:
+            continue
+        # 尝试按名字查找已有 DS 数据源
+        ds_list = await ds.list_datasources(page_size=200)
+        matched = next((x for x in ds_list if x.get("name") == ds_obj.name), None)
+        if matched:
+            ds_obj.ds_datasource_id = matched.get("id")
+            continue
+        # 创建新数据源（密码需解密后传给 DS）
+        from app.core.encrypt import decrypt_password
+        plain_password = decrypt_password(ds_obj.password) or ""
+        new_id = await ds.create_datasource(
+            name=ds_obj.name,
+            ds_type=ds_obj.type,
+            host=ds_obj.host,
+            port=ds_obj.port,
+            database=ds_obj.database_name,
+            username=ds_obj.username or "",
+            password=plain_password,
+        )
+        if new_id:
+            ds_obj.ds_datasource_id = new_id
+        else:
+            raise HTTPException(
+                status_code=502,
+                detail=f"数据源 '{ds_obj.name}' 同步到 DS 失败，请检查 DS 连接权限"
+            )
 
     # === DQC 规则收集 ===
     all_rule_ids = set()
@@ -227,12 +264,14 @@ async def _sync_to_ds(db: Session, w: Workflow) -> tuple:
         raise HTTPException(status_code=502, detail="DS 生成 task code 失败")
     task_codes = [int(x) for x in task_codes[:total_codes_needed]]
 
-    # 服务 token 和 Portal 地址
+    # 服务 token 和 Portal 地址（仅在需要 DQC 任务时校验）
     from app.core.config import settings
-    import hashlib
     svc_token = getattr(settings, "DQC_SERVICE_TOKEN", "")
-    if not svc_token:
-        svc_token = hashlib.sha256(settings.SECRET_KEY.encode()).hexdigest()[:32]
+    if dqc_count > 0 and not svc_token:
+        raise HTTPException(
+            status_code=500,
+            detail="DQC_SERVICE_TOKEN 未配置，请在 .env 中设置",
+        )
     portal_url = os.environ.get("PORTAL_BASE_URL", "http://portal:8000")
 
     # 选择翻译模式
@@ -300,7 +339,8 @@ async def sync_last_run(
         pc = await ds._discover_project()
         if not pc:
             return {"synced": 0, "error": "DS project unavailable"}
-    except Exception:
+    except Exception as e:
+        logging.getLogger(__name__).warning("DS unavailable: %s", e)
         return {"synced": 0, "error": "DS unavailable"}
 
     synced = 0
@@ -318,7 +358,8 @@ async def sync_last_run(
                 if start_str:
                     try:
                         w.last_run_time = datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S")
-                    except Exception:
+                    except Exception as e:
+                        logging.getLogger(__name__).warning("parse startTime failed: %s", e)
                         w.last_run_time = None
                 if start_str and end_str:
                     try:
@@ -326,10 +367,11 @@ async def sync_last_run(
                         w.last_run_duration = int(
                             (datetime.strptime(end_str, fmt) - datetime.strptime(start_str, fmt)).total_seconds()
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logging.getLogger(__name__).warning("parse duration failed: %s", e)
                 synced += 1
-        except Exception:
+        except Exception as e:
+            logging.getLogger(__name__).warning("sync workflow %s failed: %s", w.id, e)
             continue
     db.commit()
 
@@ -362,8 +404,8 @@ async def sync_last_run(
                     }
                     await do_notify(rule, event)
                     alerted += 1
-    except Exception:
-        pass
+    except Exception as e:
+        logging.getLogger(__name__).warning("alert check failed: %s", e)
 
     return {"synced": synced, "alerted": alerted}
 
@@ -476,7 +518,8 @@ def list_scheduled_workflows(
             from datetime import datetime
             cron = croniter(w.cron_expression, datetime.now())
             item["next_fire_time"] = str(cron.get_next(datetime))
-        except Exception:
+        except Exception as e:
+            logging.getLogger(__name__).warning("cron parse error for workflow %s: %s", w.id, e)
             item["next_fire_time"] = None
         result.append(item)
     return {"items": result, "total": len(result)}
@@ -567,15 +610,15 @@ async def delete_workflow(
             ds = get_ds_client()
             await ds.schedule_offline(w.ds_schedule_id)
             await ds.delete_schedule(w.ds_schedule_id)
-        except Exception:
-            pass
+        except Exception as e:
+            logging.getLogger(__name__).warning("DS schedule cleanup failed: %s", e)
     if w.ds_process_code:
         try:
             ds = get_ds_client()
             await ds.release_process_definition(w.ds_process_code, online=False)
             await ds.delete_process_definition(w.ds_process_code)
-        except Exception:
-            pass
+        except Exception as e:
+            logging.getLogger(__name__).warning("DS process cleanup failed: %s", e)
     # 清理 ACL 记录，避免孤儿行影响 has_any 判断
     from app.models.resource_access import SysResourceAccess
     db.query(SysResourceAccess).filter(
@@ -677,14 +720,14 @@ async def offline_workflow(
         try:
             ds = get_ds_client()
             await ds.schedule_offline(w.ds_schedule_id)
-        except Exception:
-            pass
+        except Exception as e:
+            logging.getLogger(__name__).warning("DS schedule offline failed: %s", e)
     if w.ds_process_code:
         try:
             ds = get_ds_client()
             await ds.release_process_definition(w.ds_process_code, online=False)
-        except Exception:
-            pass
+        except Exception as e:
+            logging.getLogger(__name__).warning("DS release offline failed: %s", e)
     w.status = STATUS_OFFLINE
     w.schedule_status = "OFFLINE"
     db.commit()
@@ -759,17 +802,21 @@ async def get_instance_detail(
         if rule_name.endswith("..."):
             rule_name = rule_name[:-3]
 
-        # 查找规则（按名称模糊匹配，优先匹配同一数据源下的）
-        rule = (
-            db.query(DqcRule)
-            .filter(DqcRule.name.contains(rule_name))
-            .order_by(DqcRule.id.desc())
-            .first()
-        )
+        # 查找规则：先精确匹配，再模糊匹配
+        rule = db.query(DqcRule).filter(DqcRule.name == rule_name).first()
         if not rule:
+            rule = (
+                db.query(DqcRule)
+                .filter(DqcRule.name.contains(rule_name))
+                .order_by(DqcRule.id.desc())
+                .first()
+            )
+        if not rule:
+            logging.getLogger(__name__).warning("DQC task %s matched no rule", name)
             continue
 
-        # 查找对应的检查记录（按时间窗口匹配：实例执行前后 5 分钟）
+        # 查找对应的检查记录（按时间窗口匹配：实例执行前后 2 分钟）
+        check = None
         start_time = task.get("startTime")
         if start_time:
             from datetime import datetime, timedelta
@@ -779,15 +826,16 @@ async def get_instance_detail(
                     db.query(DqcCheck)
                     .filter(
                         DqcCheck.rule_id == rule.id,
-                        DqcCheck.checked_at >= task_dt - timedelta(minutes=5),
-                        DqcCheck.checked_at <= task_dt + timedelta(minutes=5),
+                        DqcCheck.checked_at >= task_dt - timedelta(minutes=2),
+                        DqcCheck.checked_at <= task_dt + timedelta(minutes=2),
                     )
                     .order_by(DqcCheck.id.desc())
                     .first()
                 )
-            except Exception:
-                check = None
-        else:
+            except Exception as e:
+                logging.getLogger(__name__).warning("DQC check time parse failed: %s", e)
+        if not check:
+            # 回退：取该规则最近的一次检查
             check = (
                 db.query(DqcCheck)
                 .filter(DqcCheck.rule_id == rule.id)

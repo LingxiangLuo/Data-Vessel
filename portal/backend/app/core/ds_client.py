@@ -1,4 +1,5 @@
 """DolphinScheduler API 客户端单例"""
+import asyncio
 import logging
 from typing import Optional
 
@@ -18,7 +19,8 @@ class DSClient:
         self._password = settings.DS_ADMIN_PASSWORD
         self._session_id: Optional[str] = None
         self._project_code: Optional[int] = None
-        self._client = httpx.AsyncClient(timeout=30.0)
+        self._client: Optional[httpx.AsyncClient] = None
+        self._lock = asyncio.Lock()
 
     @classmethod
     def get_instance(cls) -> "DSClient":
@@ -26,9 +28,16 @@ class DSClient:
             cls._instance = cls()
         return cls._instance
 
+    def _get_client(self) -> httpx.AsyncClient:
+        """延迟创建 client，避免 event loop 绑定问题"""
+        import asyncio
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=30.0)
+        return self._client
+
     async def _login(self) -> bool:
         try:
-            resp = await self._client.post(
+            resp = await self._get_client().post(
                 f"{self._base_url}/login",
                 data={"userName": self._user, "userPassword": self._password},
             )
@@ -45,7 +54,11 @@ class DSClient:
     async def _ensure_session(self) -> bool:
         if self._session_id:
             return True
-        return await self._login()
+        async with self._lock:
+            # 双重检查：等待锁后可能已被其他协程登录
+            if self._session_id:
+                return True
+            return await self._login()
 
     async def _discover_project(self) -> Optional[int]:
         """发现 DS 默认项目 code"""
@@ -68,7 +81,7 @@ class DSClient:
         url = f"{self._base_url}{path}"
         cookies = {"sessionId": self._session_id}
         try:
-            resp = await self._client.request(method, url, cookies=cookies, **kwargs)
+            resp = await self._get_client().request(method, url, cookies=cookies, **kwargs)
             result = resp.json()
             # 401 重认证
             if result.get("code") in (300, 190001) and retry:
@@ -99,7 +112,7 @@ class DSClient:
     async def healthy(self) -> bool:
         """检查 DS 是否可用"""
         try:
-            resp = await self._client.get(
+            resp = await self._get_client().get(
                 f"{self._base_url}/actuator/health", timeout=5.0
             )
             data = resp.json()
@@ -313,8 +326,46 @@ class DSClient:
         )
         return (data or {}).get("totalList", [])
 
+    # ─────────────────────────────────────────────
+    # Datasource 管理
+    # ─────────────────────────────────────────────
+
+    async def list_datasources(self, page_size: int = 100) -> list:
+        """列出 DS 中所有数据源"""
+        data = await self.get("/datasources", params={"pageNo": 1, "pageSize": page_size})
+        return (data or {}).get("totalList", [])
+
+    async def create_datasource(
+        self,
+        name: str,
+        ds_type: str,
+        host: str,
+        port: int,
+        database: str,
+        username: str,
+        password: str,
+    ) -> Optional[int]:
+        """在 DS 中创建数据源，返回 DS datasource ID"""
+        payload = {
+            "name": name,
+            "note": "Auto-synced from Portal",
+            "type": ds_type.upper(),
+            "host": host,
+            "port": port,
+            "database": database,
+            "userName": username,
+            "password": password,
+            "connectType": None,
+        }
+        data = await self.post("/datasources", json_data=payload)
+        if isinstance(data, dict):
+            return data.get("id")
+        return None
+
     async def close(self):
-        await self._client.aclose()
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
 
 def get_ds_client() -> DSClient:

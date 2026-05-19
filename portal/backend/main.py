@@ -1,7 +1,9 @@
 import sys
 import os
 import logging
+import secrets
 import bcrypt
+from contextlib import asynccontextmanager
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -18,6 +20,11 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.core.database import engine, Base, SessionLocal
 from app.core.config import settings
 from app.core.security import hash_password
+
+# ─── 启动时安全校验 ──────────────────────────────────────────────────────────
+if not getattr(settings, "DQC_SERVICE_TOKEN", ""):
+    logging.warning("DQC_SERVICE_TOKEN 未配置，服务间调用将不可用。请在 .env 中设置强随机值。")
+
 from app.core.migrations import run_all_migrations
 from app.core.auto_migrate import auto_migrate
 from app.api import auth, datasources, sync_tasks, dashboard, ds_proxy, notifications, component, workflow, system, metadata, project
@@ -49,8 +56,7 @@ except Exception as e:
 # Alembic 不可用时降级到 create_all（仅开发环境）
 if not alembic_ok:
     Base.metadata.create_all(bind=engine)
-auto_migrate()  # 自动创建缺失的表/列
-run_all_migrations()  # 复杂数据迁移（如 datax_to_component）
+run_all_migrations()
 
 
 # ─── 种子数据：4 个内置角色 + 权限列表 ──────────────────────────────────────
@@ -224,6 +230,57 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
+class CSRFProtectionMiddleware(BaseHTTPMiddleware):
+    """CSRF 防护中间件
+
+    对使用 cookie 认证的状态变更请求验证 CSRF token。
+    豁免：
+      - GET/HEAD/OPTIONS（只读方法）
+      - 无 auth cookie 的请求（未登录）
+      - 使用 Bearer token 的请求（API 客户端）
+      - /api/auth/* 路径（登录/登出/OAuth 本身）
+    """
+    EXEMPT_PATHS = {"/api/auth/login", "/api/auth/logout", "/api/auth/oauth", "/api/auth/csrf", "/api/health"}
+
+    async def dispatch(self, request: Request, call_next):
+        if request.method in ("GET", "HEAD", "OPTIONS"):
+            return await call_next(request)
+
+        path = request.url.path
+        if any(path.startswith(p) for p in self.EXEMPT_PATHS):
+            return await call_next(request)
+
+        # 有 Bearer token 的请求不需要 CSRF（API 客户端场景）
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.lower().startswith("bearer "):
+            return await call_next(request)
+
+        # 无 auth cookie 的请求不需要 CSRF（未登录）
+        access_token = request.cookies.get("access_token")
+        if not access_token:
+            return await call_next(request)
+
+        # 验证 CSRF token
+        csrf_cookie = request.cookies.get("csrf_token")
+        csrf_header = request.headers.get("X-CSRF-Token")
+        if not csrf_cookie or not csrf_header or not secrets.compare_digest(csrf_cookie, csrf_header):
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "CSRF token 验证失败，请重新登录"},
+            )
+
+        return await call_next(request)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    from app.core.dqc_scheduler import start_scheduler, shutdown_scheduler
+    start_scheduler()
+    yield
+    shutdown_scheduler()
+
+
 app = FastAPI(
     title="数据中台 MVP",
     description="金融行业离线数据中台统一门户 API",
@@ -231,17 +288,18 @@ app = FastAPI(
     docs_url="/api/docs",
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json",
+    lifespan=lifespan,
 )
 
-# Request ID 必须第一个注册，确保后续所有中间件和路由都能使用
 app.add_middleware(RequestIdMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(CSRFProtectionMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS if settings.CORS_ORIGINS is not None else ["http://localhost:5173", "http://localhost"],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*", "X-CSRF-Token", "X-Request-ID"],
 )
 
 app.include_router(auth.router, prefix="/api")
@@ -270,11 +328,6 @@ app.include_router(dqc_rules.router, prefix="/api")
 
 from app.api import dqc_reports
 app.include_router(dqc_reports.router, prefix="/api")
-
-# 启动 DQC 报告定时调度器
-from app.core.dqc_scheduler import start_scheduler
-start_scheduler()
-
 
 @app.get("/api/health")
 def health():

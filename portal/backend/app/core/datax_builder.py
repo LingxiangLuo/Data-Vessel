@@ -160,7 +160,7 @@ def build_datax_job(
         if "--" in w or "/*" in w:
             raise ValueError("WHERE 条件中不允许包含注释")
         w_upper = w.upper()
-        for kw in ("SELECT", "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER", "UNION", "EXEC", "EXECUTE"):
+        for kw in ("INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER", "UNION", "EXEC", "EXECUTE"):
             if re.search(rf"\b{kw}\b", w_upper):
                 raise ValueError(f"WHERE 条件中不允许包含关键字: {kw}")
     if not final_where and sync_type == "increment":
@@ -177,12 +177,14 @@ def build_datax_job(
         "username": target_ds.username or "",
         "password": _pw(target_ds.password),
         "column": writer_columns,
-        "writeMode": write_mode or "insert",
         "connection": [{
             "jdbcUrl": _jdbc_url(target_ds),
             "table": [target_table],
         }],
     }
+    # PostgreSQL writer 不支持 writeMode 参数
+    if (target_ds.type or "").lower() != "postgresql":
+        writer_param["writeMode"] = write_mode or "insert"
 
     # preSql / postSql：用户显式传入优先；否则全量同步自动 TRUNCATE
     effective_pre = [s for s in (pre_sql or []) if s and s.strip()]

@@ -134,9 +134,7 @@ def verify_service_token(token: str) -> bool:
         return False
     expected = getattr(settings, "DQC_SERVICE_TOKEN", "")
     if not expected:
-        # 未配置时，使用 SECRET_KEY 的 SHA256 前 32 位作为默认值
-        import hashlib
-        expected = hashlib.sha256(settings.SECRET_KEY.encode()).hexdigest()[:32]
+        return False
     return token == expected
 
 
@@ -145,5 +143,5 @@ def get_service_user(db: Session) -> Optional[SysUser]:
     # 优先查找名为 "system" 的用户，否则找第一个管理员
     user = db.query(SysUser).filter(SysUser.username == "system").first()
     if not user:
-        user = db.query(SysUser).filter(SysUser.is_superuser == True).first()
+        user = db.query(SysUser).filter(SysUser.role == "admin").first()
     return user

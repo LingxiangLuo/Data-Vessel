@@ -1,4 +1,4 @@
-from sqlalchemy import Column, BigInteger, String, Integer, Boolean, DateTime, Text, JSON
+from sqlalchemy import Column, BigInteger, String, Integer, Boolean, DateTime, Text
 from sqlalchemy.sql import func
 
 from app.core.database import Base
@@ -15,5 +15,4 @@ class DqcCheck(Base):
     passed = Column(Boolean, nullable=False)
     error_msg = Column(Text, nullable=True)
     instance_id = Column(BigInteger, nullable=True)
-    sample_data = Column(JSON, nullable=True)  # 失败采样数据 [{col: val, ...}]
     checked_at = Column(DateTime, server_default=func.now())

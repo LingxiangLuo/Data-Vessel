@@ -45,16 +45,22 @@ def _build_datax_shell_script(config: Dict[str, Any]) -> str:
     if not raw:
         # 兜底:把整个 config 序列化作为 job
         raw = json.dumps({"job": config}, ensure_ascii=False, indent=2)
+    # 安全: 防止 heredoc 分隔符被 rawJson 内容突破
+    HEREDOC_DELIM = "PORTAL_DATAX_EOF"
+    if HEREDOC_DELIM in raw:
+        raise ValueError("DataX JSON 内容包含非法字符序列")
     # 用 heredoc 写入临时文件,然后调用 datax.py
     # 注意: heredoc 用引号包裹 'EOF' 防止变量展开
     script = (
         "set -e\n"
+        "export JAVA_HOME=${JAVA_HOME:-/opt/java/openjdk}\n"
+        "export PATH=$JAVA_HOME/bin:$PATH\n"
         "JOB_FILE=/tmp/datax_job_$$_$(date +%s).json\n"
         "cat > \"$JOB_FILE\" <<'PORTAL_DATAX_EOF'\n"
         f"{raw}\n"
         "PORTAL_DATAX_EOF\n"
         "echo \"[Portal] datax job file: $JOB_FILE\"\n"
-        "python /opt/datax/bin/datax.py \"$JOB_FILE\"\n"
+        "python3 /opt/datax/bin/datax.py \"$JOB_FILE\"\n"
         "rm -f \"$JOB_FILE\"\n"
     )
     return script
@@ -93,15 +99,18 @@ def translate_component_to_task(
     if ctype == "sql":
         ds_id = cfg.get("datasource_id")
         ds_type = "MYSQL"
+        ds_datasource_id = None
         if datasource_lookup and ds_id and ds_id in datasource_lookup:
-            ds_type = _datasource_type_for_ds(datasource_lookup[ds_id].type)
+            ds_obj = datasource_lookup[ds_id]
+            ds_type = _datasource_type_for_ds(ds_obj.type)
+            ds_datasource_id = getattr(ds_obj, "ds_datasource_id", None)
         sql_text = cfg.get("sql", "")
         # 判断 SQL 类型: SELECT 为 query(0),其他为 non-query(1)
         sql_type = "0" if sql_text.strip().lower().startswith("select") else "1"
         base["taskType"] = "SQL"
         base["taskParams"] = {
             "type": ds_type,
-            "datasource": ds_id,
+            "datasource": ds_datasource_id or ds_id,
             "sql": sql_text,
             "sqlType": sql_type,
             "preStatements": cfg.get("preStatements", []),
@@ -138,9 +147,39 @@ def translate_component_to_task(
 
     elif ctype == "datax":
         # DataX 翻译成 SHELL + heredoc
+        # 若 rawJson 缺失,尝试用 build_datax_job 现场生成标准 DataX JSON
+        datax_cfg = dict(cfg)
+        if not datax_cfg.get("rawJson"):
+            source_id = datax_cfg.get("source_id")
+            target_id = datax_cfg.get("target_id")
+            if (
+                datasource_lookup
+                and source_id in datasource_lookup
+                and target_id in datasource_lookup
+            ):
+                from app.core.datax_builder import build_datax_job
+                source_ds = datasource_lookup[source_id]
+                target_ds = datasource_lookup[target_id]
+                job = build_datax_job(
+                    source_ds=source_ds,
+                    source_table=datax_cfg.get("source_table", ""),
+                    target_ds=target_ds,
+                    target_table=datax_cfg.get("target_table", ""),
+                    field_mapping=datax_cfg.get("field_mapping", []),
+                    sync_type=datax_cfg.get("sync_type", "full"),
+                    increment_column=datax_cfg.get("increment_column"),
+                    where_clause=datax_cfg.get("where_clause"),
+                    split_pk=datax_cfg.get("split_pk"),
+                    write_mode=datax_cfg.get("write_mode", "insert"),
+                    channel=datax_cfg.get("channel", 3),
+                    pre_sql=datax_cfg.get("pre_sql"),
+                    post_sql=datax_cfg.get("post_sql"),
+                    mask_password=False,
+                )
+                datax_cfg["rawJson"] = json.dumps(job, ensure_ascii=False, indent=2)
         base["taskType"] = "SHELL"
         base["taskParams"] = {
-            "rawScript": _build_datax_shell_script(cfg),
+            "rawScript": _build_datax_shell_script(datax_cfg),
             "resourceList": [],
             "localParams": [],
         }

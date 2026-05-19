@@ -18,6 +18,7 @@ class DataSource(Base):
     description = Column(Text)
     status = Column(Integer, default=1)
     last_check_time = Column(DateTime)
+    ds_datasource_id = Column(BigInteger, nullable=True, index=True, comment="DS 数据源 ID")
     created_by = Column(BigInteger)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
