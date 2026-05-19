@@ -227,6 +227,9 @@ app = FastAPI(
     title="数据中台 MVP",
     description="金融行业离线数据中台统一门户 API",
     version="1.0.0",
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+    openapi_url="/api/openapi.json",
 )
 
 # Request ID 必须第一个注册，确保后续所有中间件和路由都能使用
