@@ -5,6 +5,7 @@
 - 每 60s 归档已完成任务
 - 解析日志级别和 DataX 统计
 """
+import asyncio
 import os
 import re
 import gzip
@@ -191,7 +192,7 @@ async def _poll_running_logs():
                 continue
 
             # 写入文件
-            lines_added = _append_log_file(log_record.storage_path, log_content)
+            lines_added = await asyncio.to_thread(_append_log_file, log_record.storage_path, log_content)
             if lines_added == 0:
                 continue
 
@@ -269,7 +270,7 @@ async def _archive_completed_logs():
         db.commit()
 
         # 清理过期日志文件
-        _cleanup_old_logs()
+        await asyncio.to_thread(_cleanup_old_logs)
     except Exception:
         db.rollback()
         logger.exception("DS log archive failed")

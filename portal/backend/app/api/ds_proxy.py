@@ -594,7 +594,7 @@ async def ds_monitor(current_user: SysUser = Depends(get_current_user)):
 
     # actuator/health 有 master/worker 状态
     try:
-        resp = await ds._client.get(f"{ds._base_url}/actuator/health", timeout=5.0)
+        resp = await ds.raw_get(f"{ds._base_url}/actuator/health", timeout=5.0)
         health_data = resp.json().get("components", {})
     except Exception:
         health_data = {}
@@ -602,7 +602,7 @@ async def ds_monitor(current_user: SysUser = Depends(get_current_user)):
     # 通过 actuator/metrics 获取 JVM 信息
     jvm_info = {}
     try:
-        mem_resp = await ds._client.get(
+        mem_resp = await ds.raw_get(
             f"{ds._base_url}/actuator/metrics/jvm.memory.max",
             cookies={"sessionId": ds._session_id} if ds._session_id else {},
             timeout=5.0,
@@ -611,7 +611,7 @@ async def ds_monitor(current_user: SysUser = Depends(get_current_user)):
             mem_data = mem_resp.json()
             jvm_info["memoryMax"] = mem_data.get("measurements", [{}])[0].get("value", 0)
 
-        used_resp = await ds._client.get(
+        used_resp = await ds.raw_get(
             f"{ds._base_url}/actuator/metrics/jvm.memory.used",
             cookies={"sessionId": ds._session_id} if ds._session_id else {},
             timeout=5.0,
@@ -620,7 +620,7 @@ async def ds_monitor(current_user: SysUser = Depends(get_current_user)):
             used_data = used_resp.json()
             jvm_info["memoryUsed"] = used_data.get("measurements", [{}])[0].get("value", 0)
 
-        cpu_resp = await ds._client.get(
+        cpu_resp = await ds.raw_get(
             f"{ds._base_url}/actuator/metrics/process.cpu.usage",
             cookies={"sessionId": ds._session_id} if ds._session_id else {},
             timeout=5.0,

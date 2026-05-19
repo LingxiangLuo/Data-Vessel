@@ -1,6 +1,7 @@
 """DolphinScheduler API 客户端单例"""
 import asyncio
 import logging
+import threading
 from typing import Optional
 
 import httpx
@@ -12,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 class DSClient:
     _instance: Optional["DSClient"] = None
-    _instance_lock = asyncio.Lock()
+    _instance_lock = threading.Lock()
 
     def __init__(self):
         self._base_url = settings.DS_API_URL
@@ -26,7 +27,9 @@ class DSClient:
     @classmethod
     def get_instance(cls) -> "DSClient":
         if cls._instance is None:
-            cls._instance = cls()
+            with cls._instance_lock:
+                if cls._instance is None:
+                    cls._instance = cls()
         return cls._instance
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -104,6 +107,10 @@ class DSClient:
 
     async def post(self, path: str, data: dict = None, json_data: dict = None) -> Optional[dict]:
         return await self._request("POST", path, data=data, json=json_data)
+
+    async def raw_get(self, url: str, **kwargs) -> httpx.Response:
+        """直接发起 GET 请求，不处理 session / JSON 解析，返回原始 Response"""
+        return await (await self._get_client()).get(url, **kwargs)
 
     async def put(self, path: str, data: dict = None, json_data: dict = None) -> Optional[dict]:
         return await self._request("PUT", path, data=data, json=json_data)

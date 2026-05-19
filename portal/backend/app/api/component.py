@@ -791,7 +791,7 @@ def run_component(
                 raise HTTPException(400, "Shell 组件代码超过 10000 字符限制")
         elif c.type == "python":
             # 1. 使用 RestrictedPython 编译时沙箱
-            from restrictedpython import compile_restricted
+            from RestrictedPython import compile_restricted
 
             rp_result = compile_restricted(code, "<inline>", "exec")
             if rp_result.errors:
