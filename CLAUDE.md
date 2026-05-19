@@ -38,57 +38,35 @@ bash scripts/deploy-to-test.sh --skip-check     # 跳过语法检查
 bash scripts/deploy-to-test.sh --force          # 强制全量重建（无缓存）
 ```
 
-## 分支模型
+## 分支策略
 
-```
-upstream (barryLiu199/data-platform-mvp)
-    │  CI 每 30 分钟自动同步
-    ▼
-  main  — 只读镜像，不直接提交，仅存放 .github/workflows/
-    │  CI 自动 merge（无冲突时）
-    ▼
-   dev  — 唯一集成分支，所有功能在此汇聚
-    ↑
- feature/xxx — 每个功能一个分支，PR 合并回 dev
-```
-
-**规则：**
-- main 不直接提交，只有 CI 写入
-- **feature 分支必须合并回 dev 才能部署**，不能直接从 feature 分支部署到测试服务器，否则会导致服务器上有 dev 缺少的文件，再从 dev 部署时炸掉
-- 部署是**手动操作**：`bash scripts/deploy-to-test.sh`，不自动触发
-- 向上游贡献时，基于 upstream/main 创建 feature 分支，cherry-pick 通用功能 commit
+- `main` — 唯一长期分支，始终可部署，**禁止直接 push**
+- `feat/<name>` — 功能分支，基于 main 切出
+- `fix/<description>` — 紧急修复分支
+- 分支生命周期：创建 → 开发 → 测试验证 → PR → 合并 → **立即删除**
 
 ## 功能开发流程
 
 ```bash
-# 1. 从最新 dev 创建 feature 分支
-git checkout dev && git pull origin dev
-git checkout -b feature/xxx
+# 1. 切分支
+git checkout main && git pull origin main
+git checkout -b feat/xxx
 
-# 2. 开发、小步提交
-git add <files> && git commit -m "feat: xxx"
+# 2. 本地测试
+cd portal/backend && rtk pytest tests/ -v --ignore=tests/test_auth_rate_limit.py
+cd portal/frontend && npm run build
 
-# 3. 合并回 dev
-git checkout dev
-git merge feature/xxx --no-edit
+# 3. 代码审查 — 每次非平凡修改后主动触发 quick-code-reviewer
+#    3+ 文件 / auth / 新 API → deep-code-reviewer
 
 # 4. 手动部署验证
 bash scripts/deploy-to-test.sh
 
-# 5. 验证通过后推送 dev
-git push origin dev
-```
-
-## 向上游贡献
-
-只贡献通用功能（不含私有业务/测试环境配置）。
-
-```bash
-git fetch upstream
-git checkout -b feature/upstream-xxx upstream/main
-git cherry-pick <sha>
-git push origin feature/upstream-xxx
-gh pr create --repo barryLiu199/data-platform-mvp --title "feat: xxx"
+# 5. 合并到 main
+git checkout main
+git merge feat/xxx --no-ff
+git push origin main
+git branch -d feat/xxx
 ```
 
 ## CI/CD
@@ -161,6 +139,47 @@ ssh -i ~/Desktop/test-server-key root@192.168.1.3 'docker logs -f dmp-portal-bac
 git config http.proxy http://127.0.0.1:7890
 git config https.proxy http://127.0.0.1:7890
 ```
+
+## 提交规范
+
+```
+<type>(<scope>): <description>
+
+<type>
+  feat     新功能
+  fix      Bug 修复
+  refactor 重构
+  chore    杂项（脚本、配置）
+  docs     文档
+
+<scope> 可选
+  backend  后端
+  frontend 前端
+  deploy   部署
+  dqc      数据质量
+  dsl      翻译器
+
+示例：
+  feat(dqc): 添加波动率校验规则 diff_percent
+  fix(frontend): SqlDev.vue 参数编辑器空值处理
+  chore(deploy): deploy-to-test.sh 增加数据库迁移
+```
+
+## 版本发布
+
+```bash
+# main → tag → 生产部署
+git tag -a v1.2.0 -m "feat: DQC Phase 1 + 参数系统"
+git push origin v1.2.0
+```
+
+## 回滚策略
+
+| 场景 | 回滚方式 |
+|------|---------|
+| 部署后 5 分钟内发现严重 bug | `git revert HEAD` + 重新部署上一个 tag |
+| 数据库 migration 导致问题 | 手动执行 down-migration（需提前准备） |
+| 容器启动失败 | `docker compose down && docker compose up -d` |
 
 ## GitHub 下载加速
 
