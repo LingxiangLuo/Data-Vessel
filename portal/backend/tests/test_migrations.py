@@ -21,6 +21,8 @@ def test_run_all_migrations_calls_all():
         "_migrate_sys_user_oauth_unique",
         "_migrate_sys_notify_channel_table",
         "_migrate_alert_rule_channel_ids",
+        "_migrate_sync_task_component_id",
+        "_migrate_datax_to_component",
     ]
 
     mocks = {f: MagicMock() for f in funcs}

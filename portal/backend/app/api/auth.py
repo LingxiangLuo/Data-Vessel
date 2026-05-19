@@ -108,9 +108,9 @@ def _clear_login_attempts(ip: str, username: str = "") -> None:
             r.delete(f"user_attempts:{username}")
     else:
         with _login_lock:
-            _login_attempts.pop(ip, None)
+            _login_attempts.pop(f"login_attempts:{ip}", None)
             if username:
-                _user_login_attempts.pop(username, None)
+                _user_login_attempts.pop(f"user_attempts:{username}", None)
 
 
 class LoginRequest(BaseModel):
