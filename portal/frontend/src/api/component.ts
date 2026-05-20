@@ -28,8 +28,6 @@ export const runComponentScript = (id: number, datasourceId?: number, runtimePar
   api.post(`/components/${id}/run${datasourceId ? `?datasource_id=${datasourceId}` : ''}`, { runtime_params: runtimeParams }, { timeout: 120000 })
 export const quickPublishComponent = (id: number) =>
   api.post(`/components/${id}/quick-publish`)
-export const setComponentStatus = (id: number, status: string) =>
-  api.put(`/components/${id}/status`, { status })
 
 // Component History
 export const getComponentHistory = (id: number) => api.get(`/components/${id}/history`)
@@ -51,5 +49,3 @@ export const reorderComponents = (orders: { id: number; sort_order: number }[]) 
   api.post('/components/reorder', { orders })
 export const moveComponentFolder = (id: number, parentId?: number | null, sortOrder?: number) =>
   api.put(`/components/folders/${id}/move`, { parent_id: parentId ?? 0, sort_order: sortOrder })
-export const resumeComponent = (id: number) =>
-  api.post(`/components/${id}/resume`)

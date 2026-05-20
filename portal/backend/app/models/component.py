@@ -45,7 +45,6 @@ class Component(Base):
     ds_task_code = Column(BigInteger)
     folder_id = Column(BigInteger, ForeignKey("component_folder.id", ondelete="SET NULL"), index=True, comment="所属文件夹 id")
     sort_order = Column(Integer, default=0, nullable=False, comment="同文件夹内排序")
-    previous_status = Column(String(50), comment="暂停前的状态")
     dqc_rule_ids = Column(JSON, nullable=True, comment="关联的数据质量规则 ID 列表")
     created_by = Column(BigInteger, ForeignKey("sys_user.id", ondelete="SET NULL"))
     created_at = Column(DateTime, server_default=func.now())

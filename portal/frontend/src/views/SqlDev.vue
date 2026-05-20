@@ -482,7 +482,6 @@ import {
   getComponents, getComponent, createComponent, updateComponent, deleteComponent,
   getDatasources, runSqlAdhoc, runComponentScript, quickPublishComponent,
   getComponentFolders, createComponentFolder, renameComponentFolder, deleteComponentFolder,
-  setComponentStatus, resumeComponent,
   moveComponent, reorderComponents, moveComponentFolder,
   getProjects,
   getComponentHistory, getComponentHistoryDetail, rollbackComponent,
@@ -493,7 +492,7 @@ import DataXEditor from '../components/DataXEditor.vue'
 import CompManagePanel from '../components/CompManagePanel.vue'
 import { useUserStore } from '../stores/user'
 import type { ComponentItem, DatasourceItem, FolderItem, ProjectItem, ComponentStatus, ComponentParam } from '../types/component'
-import { statusLabel, statusColor, manualStatusOptions } from '../types/component'
+import { statusLabel, statusColor } from '../types/component'
 import ParamEditor from '../components/ParamEditor.vue'
 import RunDialog from '../components/RunDialog.vue'
 
@@ -821,7 +820,7 @@ async function deleteFolder(id: number) {
   } catch {}
 }
 
-// ---- 状态系统（已从 ../types/component 导入 statusLabel / statusColor / manualStatusOptions）----
+// ---- 状态系统 ----
 function hexToRgba(hex: string, alpha: number): string {
   const h = hex.replace('#', '')
   const r = parseInt(h.substring(0, 2), 16)
@@ -835,19 +834,6 @@ function statusTagStyle(s: string) {
     background: hexToRgba(color, 0.12),
     color: color,
   }
-}
-
-async function setCompStatus(c: ComponentItem, status: string) {
-  try {
-    if (status === '__resume__') {
-      await resumeComponent(c.id)
-      Message.success('已从暂停恢复')
-    } else {
-      await setComponentStatus(c.id, status)
-      Message.success('状态已更新')
-    }
-    await loadComponents()
-  } catch {}
 }
 
 async function confirmDeleteComp(c: ComponentItem) {
@@ -1114,16 +1100,6 @@ function buildCompMenuItems(node: TreeNode): MenuItem[] {
     children: buildMoveToFolderMenu(t, 'move-to'),
   })
   items.push({ divider: true })
-  if (c.status === 'paused') {
-    items.push({ key: 'resume', label: '从暂停恢复' })
-  } else if (c.status !== 'archived') {
-    items.push({
-      key: 'status',
-      label: '设置状态',
-      children: buildStatusSubmenu(c.status as any),
-    })
-  }
-  items.push({ divider: true })
   items.push({ key: 'delete', label: '删除', danger: true })
   return items
 }
@@ -1147,15 +1123,6 @@ function buildFolderMenuItems(node: TreeNode): MenuItem[] {
   items.push({ divider: true })
   items.push({ key: 'delete', label: '删除', danger: true })
   return items
-}
-
-function buildStatusSubmenu(current: ComponentStatus): MenuItem[] {
-  const opts = manualStatusOptions(current)
-  return opts.map(o => ({
-    key: `status-${o.value}`,
-    label: o.label,
-    icon: 'dot',
-  }))
 }
 
 function buildMoveToFolderMenu(type: string, prefix: string): MenuItem[] {
@@ -1214,11 +1181,6 @@ async function onMenuSelect(key: string) {
     else if (targetNode.kind === 'folder') await deleteFolder(targetNode.id)
   } else if (key === 'new-subfolder') {
     if (targetNode.kind === 'folder') startNewFolder(targetNode.folderType, targetNode.id)
-  } else if (key === 'resume') {
-    if (targetNode.kind === 'component') await setCompStatus(targetNode.data, '__resume__')
-  } else if (key.startsWith('status-')) {
-    const status = key.replace('status-', '')
-    if (targetNode.kind === 'component') await setCompStatus(targetNode.data, status)
   } else if (key.startsWith('move-to-')) {
     const folderId = parseInt(key.replace('move-to-', ''), 10)
     if (targetNode.kind === 'component') await doMoveComponent(targetNode.data.id, folderId)

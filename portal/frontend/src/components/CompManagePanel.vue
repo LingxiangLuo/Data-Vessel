@@ -6,12 +6,12 @@ import ContextMenu from './ContextMenu.vue'
 import type { MenuItem } from './ContextMenu.vue'
 import {
   getComponents, deleteComponent, testComponent, publishComponent,
-  offlineComponent, runComponent, setComponentStatus, resumeComponent,
+  offlineComponent, runComponent,
   getComponentFolders, quickPublishComponent, moveComponent, reorderComponents,
   updateComponent,
 } from '../api'
 import type { ComponentItem, ComponentStatus, FolderItem } from '../types/component'
-import { statusLabel, statusColor, manualStatusOptions, STATUS_TRANSITIONS, STATUS_DEFS } from '../types/component'
+import { statusLabel, statusColor, STATUS_DEFS } from '../types/component'
 import { TYPE_GROUPS_WITH_DATAX } from '../composables/useFileTree'
 
 const emit = defineEmits<{
@@ -182,7 +182,7 @@ function typeLabel(type: string) {
 function canTest(c: ComponentItem) { return c.status === 'draft' || c.status === 'tested' }
 function canPublish(c: ComponentItem) { return c.status === 'tested' }
 function canQuickPublish(c: ComponentItem) { return c.status === 'draft' }
-function canDelete(c: ComponentItem) { return c.status === 'draft' || c.status === 'offline' || c.status === 'deprecated' || c.status === 'archived' }
+function canDelete(c: ComponentItem) { return c.status === 'draft' || c.status === 'offline' }
 
 function folderKey(type: string, folderId: number | null) {
   return `${type}-${folderId ?? 'null'}`
@@ -233,18 +233,6 @@ function buildCompMenuItems(comp: ComponentItem): MenuItem[] {
   }
   if (comp.status === 'online') {
     items.push({ key: 'offline', label: '下线' })
-  }
-  if (comp.status === 'paused') {
-    items.push({ key: 'resume', label: '从暂停恢复' })
-  }
-
-  const statusOpts = manualStatusOptions(comp.status as ComponentStatus)
-  if (statusOpts.length > 0) {
-    items.push({
-      key: 'status',
-      label: '设置状态',
-      children: statusOpts.map(o => ({ key: `status-${o.value}`, label: o.label })),
-    })
   }
 
   items.push({ divider: true })
@@ -310,8 +298,6 @@ async function onMenuSelect(key: string) {
     quickPublishComp(comp)
   } else if (key === 'offline') {
     offlineComp(comp)
-  } else if (key === 'resume') {
-    await setStatus(comp, '__resume__')
   } else if (key === 'copy') {
     clipboard.value = { action: 'copy', comp }
     Message.success('已复制')
@@ -326,9 +312,6 @@ async function onMenuSelect(key: string) {
     openDetail(comp)
   } else if (key === 'delete') {
     deleteComp(comp)
-  } else if (key.startsWith('status-')) {
-    const status = key.replace('status-', '')
-    await setStatus(comp, status)
   } else if (key.startsWith('move-to-')) {
     const folderId = parseInt(key.replace('move-to-', ''), 10)
     await doMoveComponent(comp.id, folderId)
@@ -395,20 +378,6 @@ function deleteComp(c: ComponentItem) {
       try { await deleteComponent(c.id); Message.success('已删除'); loadData(); emit('refresh') } catch {}
     },
   })
-}
-
-async function setStatus(c: ComponentItem, status: string) {
-  try {
-    if (status === '__resume__') {
-      await resumeComponent(c.id)
-      Message.success('已从暂停恢复')
-    } else {
-      await setComponentStatus(c.id, status)
-      Message.success('状态已更新')
-    }
-    loadData()
-    emit('refresh')
-  } catch {}
 }
 
 async function doMoveComponent(compId: number, folderId: number) {
@@ -500,17 +469,11 @@ function onDragEnd() {
   dragState.dropTargetFolderId = null
 }
 
-// ---- 状态流转可视化 ----
+// ---- 状态可视化 ----
 function statusTransitionPath(status: string): { label: string; color: string; current: boolean }[] {
   const defs = STATUS_DEFS[status as ComponentStatus]
   if (!defs) return []
-  const path = [{ label: defs.label, color: defs.color, current: true }]
-  const nextStatuses = STATUS_TRANSITIONS[status as ComponentStatus] || []
-  for (const s of nextStatuses) {
-    const d = STATUS_DEFS[s as ComponentStatus]
-    if (d) path.push({ label: d.label, color: d.color, current: false })
-  }
-  return path
+  return [{ label: defs.label, color: defs.color, current: true }]
 }
 
 onMounted(() => loadData())
@@ -702,13 +665,6 @@ defineExpose({ loadData })
               <span v-if="idx < statusTransitionPath(detailComp.status).length - 1" class="flow-arrow">→</span>
             </div>
           </div>
-          <div v-if="detailComp.previous_status" class="previous-status">
-            <span class="text-muted">暂停前状态：</span>
-            <span :style="{ color: statusColor(detailComp.previous_status) }">
-              {{ statusLabel(detailComp.previous_status) }}
-            </span>
-          </div>
-        </div>
 
         <!-- 描述 -->
         <div v-if="detailComp.description" class="detail-section">

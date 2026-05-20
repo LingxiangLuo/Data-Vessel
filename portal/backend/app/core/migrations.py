@@ -22,6 +22,7 @@ def run_all_migrations():
     _migrate_ds_task_log_table()
     _migrate_workflow_sync_queue_table()
     _migrate_foreign_keys()
+    _migrate_component_status_v2()
 
 
 def _migrate_sync_task_columns():
@@ -288,7 +289,7 @@ def _migrate_datax_to_component():
                 "post_sql": json.loads(task.post_sql) if task.post_sql else None,
             }
 
-            status_map = {"draft": "draft", "active": "online", "paused": "paused"}
+            status_map = {"draft": "draft", "active": "online", "paused": "tested"}
             comp_status = status_map.get(task.status, "draft")
 
             if existing:
@@ -490,3 +491,32 @@ def _migrate_foreign_keys():
                     "添加外键 %s 失败（表 %s.%s -> %s），可能仍存在孤儿数据",
                     name, table, col, ref
                 )
+
+
+def _migrate_component_status_v2():
+    """将组件无效状态迁移到 4 状态机：draft/tested/online/offline"""
+    mapping = {
+        "developing": "draft",
+        "testing": "tested",
+        "reviewing": "tested",
+        "paused": "tested",
+        "deprecated": "offline",
+        "archived": "offline",
+    }
+    with engine.connect() as conn:
+        for old, new in mapping.items():
+            conn.execute(text(
+                f"UPDATE component SET status = '{new}' WHERE status = '{old}'"
+            ))
+        # Remove previous_status column if it exists
+        cols = conn.execute(text(
+            "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'component' "
+            "AND COLUMN_NAME = 'previous_status'"
+        )).fetchall()
+        if cols:
+            try:
+                conn.execute(text("ALTER TABLE component DROP COLUMN previous_status"))
+            except Exception:
+                pass
+        conn.commit()

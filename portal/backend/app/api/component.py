@@ -22,79 +22,28 @@ router = APIRouter(prefix="/components", tags=["组件"])
 # ===== 类型与状态常量 =====
 VALID_TYPES = {"sql", "python", "shell", "datax"}
 
-# 状态定义
-STATUS_DRAFT = "draft"
-STATUS_DEVELOPING = "developing"
-STATUS_TESTING = "testing"
-STATUS_REVIEWING = "reviewing"
-STATUS_TESTED = "tested"
-STATUS_ONLINE = "online"
-STATUS_OFFLINE = "offline"
-STATUS_PAUSED = "paused"
-STATUS_DEPRECATED = "deprecated"
-STATUS_ARCHIVED = "archived"
+# 状态定义（4 状态机）
+STATUS_DRAFT    = "draft"
+STATUS_TESTED   = "tested"
+STATUS_ONLINE   = "online"
+STATUS_OFFLINE  = "offline"
 
-# 所有有效状态
-VALID_STATUSES = {
-    STATUS_DRAFT, STATUS_DEVELOPING, STATUS_TESTING,
-    STATUS_REVIEWING, STATUS_TESTED, STATUS_ONLINE,
-    STATUS_OFFLINE, STATUS_PAUSED, STATUS_DEPRECATED, STATUS_ARCHIVED,
-}
+VALID_STATUSES    = {STATUS_DRAFT, STATUS_TESTED, STATUS_ONLINE, STATUS_OFFLINE}
+EDITABLE_STATUSES = {STATUS_DRAFT, STATUS_TESTED, STATUS_OFFLINE}
+DELETABLE_STATUSES = {STATUS_DRAFT, STATUS_OFFLINE}
 
-# 用户可手动设置的状态（不包括自动状态 draft/online）
-MANUAL_STATUSES = {
-    STATUS_DEVELOPING, STATUS_TESTING, STATUS_REVIEWING,
-    STATUS_TESTED, STATUS_OFFLINE, STATUS_PAUSED,
-    STATUS_DEPRECATED, STATUS_ARCHIVED,
-}
-
-# 自动流转状态
-AUTO_STATUSES = {STATUS_DRAFT, STATUS_ONLINE}
-
-# 允许编辑/删除的状态
-EDITABLE_STATUSES = {STATUS_DRAFT, STATUS_DEVELOPING, STATUS_TESTING, STATUS_REVIEWING, STATUS_TESTED, STATUS_OFFLINE, STATUS_PAUSED, STATUS_DEPRECATED}
-DELETABLE_STATUSES = {STATUS_DRAFT, STATUS_OFFLINE, STATUS_DEPRECATED, STATUS_ARCHIVED}
-
-# 状态显示名
 STATUS_LABELS = {
-    STATUS_DRAFT: "草稿",
-    STATUS_DEVELOPING: "开发中",
-    STATUS_TESTING: "测试中",
-    STATUS_REVIEWING: "审核中",
-    STATUS_TESTED: "已测试",
-    STATUS_ONLINE: "已上线",
+    STATUS_DRAFT:   "草稿",
+    STATUS_TESTED:  "已测试",
+    STATUS_ONLINE:  "已上线",
     STATUS_OFFLINE: "已下线",
-    STATUS_PAUSED: "已暂停",
-    STATUS_DEPRECATED: "已废弃",
-    STATUS_ARCHIVED: "已归档",
 }
 
-# 状态颜色
 STATUS_COLORS = {
-    STATUS_DRAFT: "#86909C",
-    STATUS_DEVELOPING: "#2B5AED",
-    STATUS_TESTING: "#FF7D00",
-    STATUS_REVIEWING: "#14B8A6",
-    STATUS_TESTED: "#A3C644",
-    STATUS_ONLINE: "#00B42A",
-    STATUS_OFFLINE: "#C9CDD4",
-    STATUS_PAUSED: "#F53F3F",
-    STATUS_DEPRECATED: "#6B7280",
-    STATUS_ARCHIVED: "#722ED1",
-}
-
-# 状态流转规则: {当前状态: [允许的目标状态]}
-STATUS_TRANSITIONS = {
-    STATUS_DRAFT: [STATUS_DEVELOPING, STATUS_TESTING, STATUS_DEPRECATED, STATUS_ARCHIVED],
-    STATUS_DEVELOPING: [STATUS_TESTING, STATUS_PAUSED, STATUS_DEPRECATED],
-    STATUS_TESTING: [STATUS_REVIEWING, STATUS_TESTED, STATUS_PAUSED, STATUS_DEPRECATED],
-    STATUS_REVIEWING: [STATUS_TESTED, STATUS_PAUSED, STATUS_DEVELOPING],
-    STATUS_TESTED: [STATUS_ONLINE, STATUS_PAUSED, STATUS_TESTING],  # online 通过发布操作
-    STATUS_ONLINE: [STATUS_OFFLINE, STATUS_PAUSED],
-    STATUS_OFFLINE: [STATUS_ONLINE, STATUS_ARCHIVED, STATUS_PAUSED, STATUS_DEVELOPING],
-    STATUS_PAUSED: [],  # 恢复时回到 previous_status，不走 transitions
-    STATUS_DEPRECATED: [STATUS_ARCHIVED],
-    STATUS_ARCHIVED: [],  # 归档后不可修改
+    STATUS_DRAFT:   "#86909C",
+    STATUS_TESTED:  "#0FC6C2",
+    STATUS_ONLINE:  "#00B42A",
+    STATUS_OFFLINE: "#FF7D00",
 }
 
 
@@ -158,7 +107,6 @@ def _serialize(c: Component, user_map: dict = None) -> dict:
         "datasource_id": cfg.get('datasource_id'),
         "created_by": c.created_by,
         "created_by_name": user_map.get(c.created_by).username if user_map and c.created_by and user_map.get(c.created_by) else None,
-        "previous_status": c.previous_status,
         "dqc_rule_ids": c.dqc_rule_ids or [],
         "params": c.params or [],
         "created_at": str(c.created_at) if c.created_at else None,
@@ -1030,91 +978,6 @@ def offline_component(
     db.commit()
     db.refresh(c)
     return {"message": "已下线", **_serialize(c)}
-
-
-# ===== 手动状态设置 =====
-
-class SetStatusRequest(BaseModel):
-    status: str
-
-
-@router.put("/{comp_id}/status")
-def set_component_status(
-    comp_id: int,
-    req: SetStatusRequest,
-    db: Session = Depends(get_db),
-    current_user: SysUser = Depends(require_permission("component:write")),
-):
-    """手动设置组件状态（仅允许 MANUAL_STATUSES 中的状态）"""
-    c = _get_or_404(db, comp_id)
-    new_status = req.status
-
-    if new_status not in VALID_STATUSES:
-        raise HTTPException(status_code=400, detail=f"无效状态: {new_status}")
-
-    if new_status in AUTO_STATUSES:
-        raise HTTPException(status_code=400, detail=f"状态 {new_status} 为自动流转状态，不可手动设置")
-
-    if c.status == STATUS_ARCHIVED:
-        raise HTTPException(status_code=400, detail="已归档组件不可修改状态")
-
-    # 处理暂停恢复（从 paused 转出去）
-    if c.status == STATUS_PAUSED:
-        # 恢复到 previous_status
-        prev = getattr(c, 'previous_status', None) or STATUS_DEVELOPING
-        c.status = prev
-        try:
-            c.previous_status = None
-        except Exception:
-            pass
-        db.commit()
-        db.refresh(c)
-        return {"message": f"已恢复到 {STATUS_LABELS.get(prev, prev)}", **_serialize(c)}
-
-    # 处理暂停：记录 previous_status
-    if new_status == STATUS_PAUSED:
-        try:
-            c.previous_status = c.status
-        except Exception:
-            pass
-        c.status = new_status
-        db.commit()
-        db.refresh(c)
-        return {"message": "已暂停", **_serialize(c)}
-
-    # 校验流转规则
-    allowed = STATUS_TRANSITIONS.get(c.status, [])
-    if new_status not in allowed:
-        raise HTTPException(
-            status_code=400,
-            detail=f"状态流转非法: {STATUS_LABELS.get(c.status, c.status)} → {STATUS_LABELS.get(new_status, new_status)}"
-        )
-
-    c.status = new_status
-    db.commit()
-    db.refresh(c)
-    return {"message": f"状态已更新为 {STATUS_LABELS.get(new_status, new_status)}", **_serialize(c)}
-
-
-@router.post("/{comp_id}/resume")
-def resume_component(
-    comp_id: int,
-    db: Session = Depends(get_db),
-    current_user: SysUser = Depends(require_permission("component:write")),
-):
-    """从暂停状态恢复组件"""
-    c = _get_or_404(db, comp_id)
-    if c.status != STATUS_PAUSED:
-        raise HTTPException(status_code=400, detail="组件未处于暂停状态")
-    prev = getattr(c, 'previous_status', None) or STATUS_DEVELOPING
-    c.status = prev
-    try:
-        c.previous_status = None
-    except Exception:
-        pass
-    db.commit()
-    db.refresh(c)
-    return {"message": f"已恢复到 {STATUS_LABELS.get(prev, prev)}", **_serialize(c)}
 
 
 # ===== 移动与排序 =====
