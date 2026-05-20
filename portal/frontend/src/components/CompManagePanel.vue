@@ -665,6 +665,7 @@ defineExpose({ loadData })
               <span v-if="idx < statusTransitionPath(detailComp.status).length - 1" class="flow-arrow">→</span>
             </div>
           </div>
+        </div>
 
         <!-- 描述 -->
         <div v-if="detailComp.description" class="detail-section">
