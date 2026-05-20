@@ -53,15 +53,16 @@ def _build_datax_shell_script(config: Dict[str, Any]) -> str:
     # 注意: heredoc 用引号包裹 'EOF' 防止变量展开
     script = (
         "set -e\n"
+        "umask 077\n"
         "export JAVA_HOME=${JAVA_HOME:-/opt/java/openjdk}\n"
         "export PATH=$JAVA_HOME/bin:$PATH\n"
         "JOB_FILE=/tmp/datax_job_$$_$(date +%s).json\n"
+        "trap 'rm -f \"$JOB_FILE\"' EXIT\n"
         "cat > \"$JOB_FILE\" <<'PORTAL_DATAX_EOF'\n"
         f"{raw}\n"
         "PORTAL_DATAX_EOF\n"
         "echo \"[Portal] datax job file: $JOB_FILE\"\n"
         "python3 /opt/datax/bin/datax.py \"$JOB_FILE\"\n"
-        "rm -f \"$JOB_FILE\"\n"
     )
     return script
 

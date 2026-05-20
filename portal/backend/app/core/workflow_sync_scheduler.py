@@ -30,7 +30,7 @@ def _to_6_field_cron(cron_expr: str) -> str:
 
 
 async def _do_publish(db: Session, record: WorkflowSyncQueue) -> None:
-    """执行工作流发布：清理旧 PD → 创建/更新 PD + 创建 schedule + 上线"""
+    """执行工作流发布：创建/更新 PD + 上线，成功后清理旧资源"""
     from app.services.publisher import WorkflowPublisher
 
     workflow = db.query(Workflow).filter(Workflow.id == record.workflow_id).first()
@@ -38,20 +38,12 @@ async def _do_publish(db: Session, record: WorkflowSyncQueue) -> None:
         raise ValueError(f"Workflow {record.workflow_id} not found")
 
     ds = get_ds_client()
-    # 清理旧资源，避免产生孤儿 PD/schedule
-    if workflow.ds_schedule_id:
-        try:
-            await ds.schedule_offline(workflow.ds_schedule_id)
-            await ds.delete_schedule(workflow.ds_schedule_id)
-        except Exception as e:
-            logger.warning("Cleanup old schedule %s failed: %s", workflow.ds_schedule_id, e)
-        workflow.ds_schedule_id = None
-    if workflow.ds_process_code:
-        try:
-            await ds.delete_process_definition(workflow.ds_process_code)
-        except Exception as e:
-            logger.warning("Cleanup old PD %s failed: %s", workflow.ds_process_code, e)
-        workflow.ds_process_code = None
+    old_schedule_id = workflow.ds_schedule_id
+    old_pd_code = workflow.ds_process_code
+
+    # 清空 DB 引用，让 publisher 重新创建（不删除 DS 侧，避免创建失败后无法回查）
+    workflow.ds_schedule_id = None
+    workflow.ds_process_code = None
 
     publisher = WorkflowPublisher(db)
     pd_code, schedule_id = await publisher.publish(workflow)
@@ -67,6 +59,19 @@ async def _do_publish(db: Session, record: WorkflowSyncQueue) -> None:
     workflow.status = "online"
     workflow.schedule_status = "ONLINE"
     db.commit()
+
+    # 发布成功后再清理旧资源（此时失败只记 warning，不影响结果）
+    if old_schedule_id and old_schedule_id != schedule_id:
+        try:
+            await ds.schedule_offline(old_schedule_id)
+            await ds.delete_schedule(old_schedule_id)
+        except Exception as e:
+            logger.warning("Cleanup old schedule %s failed: %s", old_schedule_id, e)
+    if old_pd_code and old_pd_code != pd_code:
+        try:
+            await ds.delete_process_definition(old_pd_code)
+        except Exception as e:
+            logger.warning("Cleanup old PD %s failed: %s", old_pd_code, e)
 
 
 async def _do_online(db: Session, record: WorkflowSyncQueue) -> None:
@@ -174,14 +179,22 @@ async def _consume_queue() -> None:
     """消费 outbox 队列"""
     db = SessionLocal()
     try:
-        # 获取待处理记录（优先重试间隔长的，避免频繁失败占用资源）
+        # 恢复超时的 processing 记录（进程崩溃后遗留）
+        stale_cutoff = datetime.now() - timedelta(minutes=5)
+        db.query(WorkflowSyncQueue).filter(
+            WorkflowSyncQueue.status == "processing",
+            WorkflowSyncQueue.updated_at < stale_cutoff,
+        ).update({"status": "pending"}, synchronize_session=False)
+        db.commit()
+
+        # 获取待处理记录（按 updated_at 排序，避免高退避记录占满批次）
         records = (
             db.query(WorkflowSyncQueue)
             .filter(
                 WorkflowSyncQueue.status.in_(["pending", "failed"]),
                 WorkflowSyncQueue.retry_count < WorkflowSyncQueue.max_retries,
             )
-            .order_by(WorkflowSyncQueue.created_at)
+            .order_by(WorkflowSyncQueue.updated_at)
             .limit(10)
             .all()
         )
@@ -198,6 +211,7 @@ async def _consume_queue() -> None:
             handler = _ACTION_HANDLERS.get(record.action)
             if not handler:
                 record.status = "failed"
+                record.retry_count = record.max_retries  # 防止无限循环
                 record.error_message = f"Unknown action: {record.action}"
                 db.commit()
                 continue

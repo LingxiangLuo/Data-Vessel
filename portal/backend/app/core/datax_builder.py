@@ -179,8 +179,7 @@ def build_datax_job(
         "password": _pw(target_ds.password),
         "column": writer_columns,
         "connection": [{
-            # DataX 规范：writer jdbcUrl 也必须是列表
-            "jdbcUrl": [_jdbc_url(target_ds)],
+            "jdbcUrl": _jdbc_url(target_ds),
             "table": [target_table],
         }],
     }

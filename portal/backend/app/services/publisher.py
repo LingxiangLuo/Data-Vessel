@@ -202,7 +202,9 @@ class WorkflowPublisher:
         """创建或更新 DS Process Definition（保持 OFFLINE）"""
         if w.ds_process_code:
             # 先 offline 才能更新
-            await self.ds.release_process_definition(w.ds_process_code, online=False)
+            ok = await self.ds.release_process_definition(w.ds_process_code, online=False)
+            if not ok:
+                raise HTTPException(status_code=502, detail="DS 下线旧 process-definition 失败，无法更新")
             ok = await self.ds.update_process_definition(
                 w.ds_process_code,
                 payload["name"], payload["description"],
@@ -224,7 +226,10 @@ class WorkflowPublisher:
         schedule_id = w.ds_schedule_id
         if w.cron_expression:
             if schedule_id:
-                await self.ds.update_schedule(schedule_id, w.cron_expression)
-            else:
+                ok = await self.ds.update_schedule(schedule_id, w.cron_expression)
+                if not ok:
+                    # schedule 在 DS 侧已消失，清除本地引用并新建
+                    schedule_id = None
+            if not schedule_id:
                 schedule_id = await self.ds.create_schedule(pd_code, w.cron_expression)
         return schedule_id

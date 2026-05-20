@@ -234,7 +234,7 @@ def substitute_config(cfg: Dict[str, Any], ctx: Dict[str, str], ctype: str, biz_
             new_cfg["field_mapping"] = [
                 {
                     **fm,
-                    "value": substitute(fm.get("value", ""), ctx, biz_date, cyctime) if fm.get("kind") == "variable" else fm.get("value"),
+                    "src": substitute(fm.get("src", ""), ctx, biz_date, cyctime) if fm.get("kind") in ("variable", "constant") else fm.get("src", ""),
                 }
                 for fm in new_cfg["field_mapping"]
             ]
