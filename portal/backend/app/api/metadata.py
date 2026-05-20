@@ -358,15 +358,15 @@ def preview_table(
                 # table 已通过正则校验，仅允许字母数字下划线和单点号
                 if "." in table:
                     sch, tbl = table.split(".", 1)
-                    cur.execute('SELECT * FROM %s.%s LIMIT %%s', (psycopg2.extensions.AsIs(f'"{sch}"'), psycopg2.extensions.AsIs(f'"{tbl}"'), limit))
+                    cur.execute('SELECT * FROM %s.%s LIMIT %s', (psycopg2.extensions.AsIs(f'"{sch}"'), psycopg2.extensions.AsIs(f'"{tbl}"'), limit))
                 else:
                     # 先尝试 search_path，再 fallback schema-qualified
                     try:
-                        cur.execute('SELECT * FROM %s LIMIT %%s', (psycopg2.extensions.AsIs(f'"{table}"'), limit))
+                        cur.execute('SELECT * FROM %s LIMIT %s', (psycopg2.extensions.AsIs(f'"{table}"'), limit))
                     except Exception:
                         conn.rollback()
                         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-                        cur.execute('SELECT * FROM %s.%s LIMIT %%s', (psycopg2.extensions.AsIs(f'"{ds.database_name}"'), psycopg2.extensions.AsIs(f'"{table}"'), limit))
+                        cur.execute('SELECT * FROM %s.%s LIMIT %s', (psycopg2.extensions.AsIs(f'"{ds.database_name}"'), psycopg2.extensions.AsIs(f'"{table}"'), limit))
                 rows = cur.fetchall()
                 columns = list(rows[0].keys()) if rows else [desc[0] for desc in cur.description] if cur.description else []
             finally:

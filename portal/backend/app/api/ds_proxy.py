@@ -414,6 +414,57 @@ async def list_instance_tasks(
     return items
 
 
+@router.get("/instances/{instance_id}/detail")
+async def get_instance_detail(
+    instance_id: int,
+    current_user: SysUser = Depends(get_current_user),
+):
+    """实例详情（流程信息 + 任务列表）"""
+    ds = _ds()
+    pc = await _project_code(ds)
+
+    # 流程实例信息
+    inst = await ds.get(f"/projects/{pc}/process-instances/{instance_id}")
+    if not inst:
+        raise HTTPException(status_code=404, detail="实例不存在")
+
+    # 任务实例列表
+    tasks = await ds.get_task_instances(instance_id)
+    task_items = []
+    for t in tasks:
+        start = t.get("startTime")
+        end = t.get("endTime")
+        duration = None
+        if start and end:
+            try:
+                fmt = "%Y-%m-%d %H:%M:%S"
+                duration = int((datetime.strptime(end, fmt) - datetime.strptime(start, fmt)).total_seconds())
+            except Exception:
+                pass
+        task_items.append({
+            "id": t.get("id"),
+            "name": t.get("name", ""),
+            "taskType": t.get("taskType", ""),
+            "state": _fmt_state(t.get("state")),
+            "startTime": start,
+            "endTime": end,
+            "duration": duration,
+        })
+
+    return {
+        "instance": {
+            "id": inst.get("id"),
+            "name": inst.get("name", ""),
+            "state": _fmt_state(inst.get("state")),
+            "startTime": inst.get("startTime"),
+            "endTime": inst.get("endTime"),
+            "runTimes": inst.get("runTimes"),
+            "host": inst.get("host"),
+        },
+        "tasks": task_items,
+    }
+
+
 @router.get("/tasks/{task_id}/log")
 async def get_task_log(
     task_id: int,

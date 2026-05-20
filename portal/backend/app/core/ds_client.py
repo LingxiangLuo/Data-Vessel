@@ -77,7 +77,6 @@ class DSClient:
             return self._project_code
         return None
 
-    @property
     async def project_code(self) -> Optional[int]:
         return await self._discover_project()
 
