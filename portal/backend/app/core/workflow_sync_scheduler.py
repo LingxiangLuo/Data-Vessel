@@ -229,6 +229,12 @@ async def _consume_queue() -> None:
                 exhausted = record.retry_count >= record.max_retries
                 record.status = "failed" if exhausted else "pending"
                 record.error_message = str(e)[:500]
+                # publish 乐观更新了 online，失败时回写 tested
+                if exhausted and record.action == "publish":
+                    wf = db.query(Workflow).filter(Workflow.id == record.workflow_id).first()
+                    if wf and wf.status == "online":
+                        wf.status = "tested"
+                        wf.schedule_status = "OFFLINE"
                 db.commit()
                 if exhausted:
                     logger.error(

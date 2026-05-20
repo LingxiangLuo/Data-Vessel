@@ -589,6 +589,11 @@ async def publish_workflow(
             detail=f"只有 tested 状态可发布,当前 {w.status},请先测试",
         )
     record = _enqueue_sync(db, w.id, "publish")
+    # 乐观更新本地状态，DS 同步失败时调度器会回写
+    w.status = STATUS_ONLINE
+    w.schedule_status = "ONLINE"
+    db.commit()
+    db.refresh(w)
     return {
         "message": "已提交发布队列，后台同步中",
         "sync_status": record.status,
