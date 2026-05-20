@@ -22,7 +22,8 @@ class DSClient:
         self._session_id: Optional[str] = None
         self._project_code: Optional[int] = None
         self._client: Optional[httpx.AsyncClient] = None
-        self._lock = asyncio.Lock()
+        self._client_lock = asyncio.Lock()
+        self._session_lock = asyncio.Lock()
 
     @classmethod
     def get_instance(cls) -> "DSClient":
@@ -35,7 +36,7 @@ class DSClient:
     async def _get_client(self) -> httpx.AsyncClient:
         """延迟创建 client，避免 event loop 绑定问题"""
         if self._client is None:
-            async with self._lock:
+            async with self._client_lock:
                 if self._client is None:
                     self._client = httpx.AsyncClient(timeout=30.0)
         return self._client
@@ -59,7 +60,7 @@ class DSClient:
     async def _ensure_session(self) -> bool:
         if self._session_id:
             return True
-        async with self._lock:
+        async with self._session_lock:
             # 双重检查：等待锁后可能已被其他协程登录
             if self._session_id:
                 return True

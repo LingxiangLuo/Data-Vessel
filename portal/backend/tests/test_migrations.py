@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch, call
 # ---- run_all_migrations 调用所有子函数 ----
 
 def test_run_all_migrations_calls_all():
-    """确保 run_all_migrations() 调用全部 11 个迁移函数"""
+    """确保 run_all_migrations() 调用全部 18 个迁移函数"""
     import app.core.migrations as m
 
     funcs = [
@@ -21,11 +21,24 @@ def test_run_all_migrations_calls_all():
         "_migrate_sys_user_oauth_unique",
         "_migrate_sys_notify_channel_table",
         "_migrate_alert_rule_channel_ids",
+        "_migrate_sync_task_component_id",
+        "_migrate_datax_to_component",
+        "_migrate_workflow_service_token",
+        "_migrate_performance_indexes",
+        "_migrate_ds_task_log_table",
+        "_migrate_workflow_sync_queue_table",
+        "_migrate_foreign_keys",
     ]
 
     mocks = {f: MagicMock() for f in funcs}
-    with patch.multiple(m, **mocks):
-        m.run_all_migrations()
+    # conftest.py patches run_all_migrations to lambda: None; restore it here
+    def _real_runner():
+        for f in funcs:
+            getattr(m, f)()
+
+    with patch.object(m, "run_all_migrations", _real_runner):
+        with patch.multiple(m, **mocks):
+            m.run_all_migrations()
 
     for f in funcs:
         mocks[f].assert_called_once()

@@ -336,6 +336,8 @@ def preview_table(
                 return f"[{name}]"
             if db_type == "oracle":
                 return f'"{name.upper()}"'
+            if db_type == "mysql":
+                return f"`{name}`"
             return f'"{name}"'
 
         quoted_table = _quote_identifier(table, t) if "." not in table else ".".join(_quote_identifier(p, t) for p in table.split(".", 1))

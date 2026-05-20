@@ -4,8 +4,9 @@ import pytest
 
 @pytest.fixture
 def sample_workflow(db_session, test_user, sample_component):
-    """创建一个测试工作流。"""
+    """创建一个测试工作流，同时授予 testuser admin 资源权限。"""
     from app.models.workflow import Workflow
+    from app.models.resource_access import SysResourceAccess
     w = Workflow(
         name="test_workflow",
         description="测试工作流",
@@ -19,6 +20,16 @@ def sample_workflow(db_session, test_user, sample_component):
     )
     db_session.add(w)
     db_session.flush()
+    # 自动授予创建者 admin 权限（匹配 create_workflow 行为）
+    db_session.add(SysResourceAccess(
+        resource_type="workflow",
+        resource_id=w.id,
+        subject_type="user",
+        subject_id=test_user.id,
+        permission="admin",
+        granted_by=test_user.id,
+    ))
+    db_session.commit()
     db_session.refresh(w)
     return w
 

@@ -32,7 +32,22 @@ function reportFrontendError(level: 'error' | 'warn' | 'info', message: string, 
   }
 }
 
-api.interceptors.request.use((config) => config)
+function getCookie(name: string): string | null {
+  const match = document.cookie.match(new RegExp('(?:^|; )' + name.replace(/([.$?*|{}()[\]\\/+^])/g, '\\$1') + '=([^;]*)'))
+  return match ? decodeURIComponent(match[1]) : null
+}
+
+api.interceptors.request.use((config) => {
+  // 非只读请求自动携带 CSRF token（cookie 认证场景）
+  if (config.method && !['get', 'head', 'options'].includes(config.method.toLowerCase())) {
+    const csrf = getCookie('csrf_token')
+    if (csrf) {
+      config.headers = config.headers || {}
+      config.headers['X-CSRF-Token'] = csrf
+    }
+  }
+  return config
+})
 
 api.interceptors.response.use(
   (response) => response.data,

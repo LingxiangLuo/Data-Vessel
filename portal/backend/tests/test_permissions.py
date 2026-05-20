@@ -15,36 +15,13 @@ def _make_user(role: str = "user"):
 
 
 def _make_db(has_permission: bool):
+    """Build a mock db for require_permission testing.
+
+    _is_admin is patched separately; this mock only handles the permission query.
     """
-    Builds a mock db that handles two query chains used by require_permission:
-
-    1. _is_admin: db.query(SysUserRole).join(SysRole, cond).filter(...).first()
-       → must return None so user is NOT treated as admin
-
-    2. permission check: db.query(SysPermission).join(SysRolePermission, cond)
-                          .join(SysUserRole, cond).filter(...).first()
-       → returns a MagicMock (truthy) when has_permission=True, else None
-
-    MagicMock chains share the same `.join()` mock, so we distinguish by call count:
-    first call to .join() is from _is_admin (1 join), second is permission check (2 joins).
-    We use side_effect on the nested chain to control .first() by depth.
-    """
-    from app.models.role import SysUserRole, SysRole, SysPermission
-
     db = MagicMock()
     perm_obj = MagicMock() if has_permission else None
-
-    def query_side_effect(model):
-        q = MagicMock()
-        if model is SysUserRole:
-            # _is_admin: .join(SysRole).filter(...).first() → None (not admin)
-            q.join.return_value.filter.return_value.first.return_value = None
-        elif model is SysPermission:
-            # permission check: .join(...).join(...).filter(...).first()
-            q.join.return_value.join.return_value.filter.return_value.first.return_value = perm_obj
-        return q
-
-    db.query.side_effect = query_side_effect
+    db.query.return_value.join.return_value.join.return_value.filter.return_value.first.return_value = perm_obj
     return db
 
 
@@ -60,7 +37,8 @@ def test_require_permission_granted():
     user = _make_user()
     db = _make_db(has_permission=True)
     dep = require_permission("component:write")
-    result = dep(current_user=user, db=db)
+    with patch("app.core.permissions._is_admin", return_value=False):
+        result = dep(current_user=user, db=db)
     assert result == user
 
 
@@ -69,7 +47,8 @@ def test_require_permission_denied():
     db = _make_db(has_permission=False)
     dep = require_permission("component:write")
     with pytest.raises(HTTPException) as exc_info:
-        dep(current_user=user, db=db)
+        with patch("app.core.permissions._is_admin", return_value=False):
+            dep(current_user=user, db=db)
     assert exc_info.value.status_code == 403
 
 

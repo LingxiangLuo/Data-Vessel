@@ -85,9 +85,9 @@ class TestUpdate:
         assert resp.status_code == 200
         assert resp.json()["name"] == "updated_name"
 
-    def test_update_non_editable_status(self, auth_client, sample_component):
-        sample_component.status = "online"
-        from app.api.component import STATUS_ONLINE
+    def test_update_non_editable_status(self, auth_client, sample_component, db_session):
+        db_session.query(type(sample_component)).filter_by(id=sample_component.id).update({"status": "online"})
+        db_session.commit()
         resp = auth_client.put(f"/api/components/{sample_component.id}", json={
             "name": "should_fail",
         })
@@ -144,7 +144,8 @@ class TestFolder:
         resp = auth_client.delete(f"/api/components/folders/{sample_folder.id}")
         assert resp.status_code == 400
 
-    def test_delete_folder_with_components(self, auth_client, sample_folder, sample_component):
-        sample_component.folder_id = sample_folder.id
+    def test_delete_folder_with_components(self, auth_client, sample_folder, sample_component, db_session):
+        db_session.query(type(sample_component)).filter_by(id=sample_component.id).update({"folder_id": sample_folder.id})
+        db_session.commit()
         resp = auth_client.delete(f"/api/components/folders/{sample_folder.id}")
         assert resp.status_code == 400
