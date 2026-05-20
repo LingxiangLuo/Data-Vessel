@@ -38,9 +38,9 @@ class WorkflowPublisher:
         Process Definition 创建后保持 OFFLINE 状态，调用方需随后执行 online()。
         """
         comp_ids, node_count = self._extract_nodes(w)
-        comps, comp_map = self._load_components(comp_ids)
+        comps, comp_map = await self._load_components(comp_ids)
         datasource_map = await self._sync_datasources(comps)
-        dqc_rules_lookup, dqc_count = self._collect_dqc_rules(comps)
+        dqc_rules_lookup, dqc_count = await self._collect_dqc_rules(comps)
         task_codes = await self._allocate_task_codes(node_count, dqc_count)
         svc_token = await self._ensure_service_token(w, dqc_count)
         payload = self._translate(w, comp_map, task_codes, datasource_map, dqc_rules_lookup, svc_token)
