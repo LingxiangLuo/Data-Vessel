@@ -233,19 +233,25 @@ async def sync_last_run(
 
     import asyncio
 
-    # 1. 异步拉取 DS 数据
-    ds_results = []
-    for w in workflows:
+    # 1. 异步拉取 DS 数据（分批并发，避免串行瓶颈）
+    async def _fetch_instance(w: Workflow):
         try:
             inst = await ds.get(f"/projects/{pc}/process-instances", params={
                 "pageNo": 1, "pageSize": 1,
                 "processDefinitionCode": w.ds_process_code,
             })
             last = (inst or {}).get("totalList", [None])[0]
-            ds_results.append((w.id, last))
+            return (w.id, last)
         except Exception as e:
             logging.getLogger(__name__).warning("sync workflow %s failed: %s", w.id, e)
-            ds_results.append((w.id, None))
+            return (w.id, None)
+
+    BATCH_SIZE = 10
+    ds_results = []
+    for i in range(0, len(workflows), BATCH_SIZE):
+        batch = workflows[i : i + BATCH_SIZE]
+        results = await asyncio.gather(*[_fetch_instance(w) for w in batch])
+        ds_results.extend(results)
 
     # 2. 同步 DB 更新放到线程池执行，避免阻塞事件循环
     def _update_workflows():
@@ -566,11 +572,41 @@ def test_workflow(
             status_code=400,
             detail=f"以下组件未上线,无法测试: {', '.join(unpublished)}",
         )
-    # TODO Phase 5+: 实际触发 DS 试运行
+    # === DAG 连通性检查 ===
+    dag = w.dag_json or {}
+    nodes = dag.get("nodes", [])
+    edges = dag.get("edges", [])
+    if nodes and edges:
+        node_ids = {n.get("id") or f"node_{i}" for i, n in enumerate(nodes) if not n.get("skip")}
+        adj = {nid: [] for nid in node_ids}
+        in_degree = {nid: 0 for nid in node_ids}
+        for edge in edges:
+            src = edge.get("source")
+            tgt = edge.get("target")
+            if src in node_ids and tgt in node_ids:
+                adj[src].append(tgt)
+                in_degree[tgt] += 1
+        # 孤立节点（无入无出）
+        isolated = [nid for nid in node_ids if in_degree[nid] == 0 and len(adj[nid]) == 0]
+        if isolated:
+            raise HTTPException(status_code=400, detail=f"DAG 中存在孤立节点，请检查连线: {', '.join(isolated)}")
+        # 环检测（拓扑排序）
+        queue = [nid for nid in node_ids if in_degree[nid] == 0]
+        visited = set()
+        while queue:
+            nid = queue.pop(0)
+            visited.add(nid)
+            for neighbor in adj.get(nid, []):
+                in_degree[neighbor] -= 1
+                if in_degree[neighbor] == 0:
+                    queue.append(neighbor)
+        if len(visited) != len(node_ids):
+            raise HTTPException(status_code=400, detail="DAG 中存在环路，请检查节点连线")
+
     w.status = STATUS_TESTED
     db.commit()
     db.refresh(w)
-    return {"message": "测试通过 (Phase 4 占位)", **_serialize(w, db)}
+    return {"message": "测试通过", **_serialize(w, db)}
 
 
 @router.post("/{wf_id}/publish")

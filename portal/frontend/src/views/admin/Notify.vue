@@ -173,7 +173,7 @@ function onTypeChange() { chForm.webhook_url = ''; chForm.secret = ''; chForm.em
 function resetModal() { modalVisible.value = false; editingId.value = null }
 
 async function loadSmtp() {
-  try { const res: any = await adminGetConfig('smtp_config'); if (res?.value) Object.assign(smtpForm.value, res.value) } catch {}
+  try { const res: any = await adminGetConfig('smtp_config'); if (res?.value) Object.assign(smtpForm.value, res.value) } catch (e: any) { console.error(e); Message.error((e as any).message || '操作失败') }
 }
 async function saveSmtp() {
   smtpSaving.value = true
@@ -225,7 +225,7 @@ async function handleSave() {
     if (editingId.value) { await adminUpdateChannel(editingId.value, payload); Message.success('已更新') }
     else { await adminCreateChannel(payload); Message.success('已创建') }
     modalVisible.value = false; loadChannels()
-  } catch {}
+  } catch (e: any) { console.error(e) }
 }
 
 async function handleTest(r: Channel) {
@@ -237,7 +237,7 @@ function handleDelete(r: Channel) {
   Modal.confirm({
     title: '删除渠道',
     content: `确认删除「${r.name}」？删除后引用此渠道的告警规则将失效。`,
-    onOk: async () => { try { await adminDeleteChannel(r.id); Message.success('已删除'); loadChannels() } catch {} },
+    onOk: async () => { try { await adminDeleteChannel(r.id); Message.success('已删除'); loadChannels() } catch (e: any) { console.error(e); Message.error((e as any).message || '操作失败') } },
   })
 }
 

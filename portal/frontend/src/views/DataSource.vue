@@ -149,7 +149,7 @@ async function loadData() {
   try {
     const res: any = await getDatasources({ page: pagination.current, page_size: pagination.pageSize, keyword: keyword.value || undefined })
     dataSource.value = res.items; pagination.total = res.total
-  } catch {} finally { loading.value = false }
+  } catch (e: any) { console.error(e) } finally { loading.value = false }
 }
 
 function onPageChange(page: number) { pagination.current = page; loadData() }
@@ -171,7 +171,7 @@ async function handleSubmit() {
     if (editingId.value) { await updateDatasource(editingId.value, form); Message.success('更新成功') }
     else { await createDatasource(form); Message.success('创建成功') }
     modalVisible.value = false; loadData()
-  } catch {} finally { submitLoading.value = false }
+  } catch (e: any) { console.error(e) } finally { submitLoading.value = false }
 }
 
 async function handleTest(record: any) {
@@ -180,11 +180,11 @@ async function handleTest(record: any) {
     if (res.status === 1) Message.success(res.message)
     else Message.warning(res.message)
     loadData()
-  } catch {}
+  } catch (e: any) { console.error(e) }
 }
 
 async function handleDelete(id: number) {
-  try { await deleteDatasource(id); Message.success('删除成功'); loadData() } catch {}
+  try { await deleteDatasource(id); Message.success('删除成功'); loadData() } catch (e: any) { console.error(e); Message.error((e as any).message || '操作失败') }
 }
 </script>
 

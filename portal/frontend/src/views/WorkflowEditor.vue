@@ -106,7 +106,7 @@ async function onScheduleSave(cron: string) {
   if (!workflowId.value) return
   try {
     await updateWorkflow(workflowId.value, { cron_expression: cron })
-  } catch {}
+  } catch (e: any) { console.error(e) }
 }
 
 async function handleSave() {

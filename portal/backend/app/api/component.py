@@ -140,10 +140,15 @@ def _save_history(db: Session, c: Component, comment: str = None):
 def _check_workflow_refs(db: Session, comp_id: int):
     """检查组件是否被工作流引用，若有则抛出 400"""
     from app.models.workflow import Workflow
-    refs = db.query(Workflow.name).filter(
-        Workflow.steps_json.contains(f'"component_id": {comp_id}'),
-        Workflow.status.notin_(["offline", "archived"]),
+    all_wfs = db.query(Workflow).filter(
+        Workflow.status.notin_(["offline"]),
     ).all()
+    refs = []
+    for wf in all_wfs:
+        for step in (wf.steps_json or []):
+            if step.get("component_id") == comp_id:
+                refs.append(wf)
+                break
     if refs:
         names = "、".join(r.name for r in refs[:5])
         raise HTTPException(
@@ -154,18 +159,49 @@ def _check_workflow_refs(db: Session, comp_id: int):
 
 
 
+def _validate_sql_safe(sql: str) -> None:
+    """使用 sqlparse 验证 SQL 是安全的只读 SELECT。"""
+    import sqlparse
+
+    parsed = sqlparse.parse(sql)
+    if len(parsed) != 1:
+        raise HTTPException(400, "仅允许单条 SQL 语句")
+
+    stmt = parsed[0]
+    # 跳过空白和注释 token
+    tokens = [t for t in stmt.flatten() if not t.is_whitespace and t.ttype not in sqlparse.tokens.Comment]
+    if not tokens:
+        raise HTTPException(400, "SQL 语句为空")
+
+    # 第一个有意义 token 必须是 SELECT 或 WITH（CTE）
+    first = tokens[0]
+    if first.ttype not in (sqlparse.tokens.DML, sqlparse.tokens.Keyword) or first.normalized not in ("SELECT", "WITH"):
+        raise HTTPException(400, "仅允许 SELECT 查询语句")
+
+    # 禁止危险关键字（UNION 本身是只读的，放行；INTO 可导出文件，禁止）
+    forbidden = {
+        "INTO", "INSERT", "UPDATE", "DELETE",
+        "DROP", "CREATE", "ALTER", "EXEC", "EXECUTE", "TRUNCATE",
+    }
+    for t in tokens:
+        if t.normalized in forbidden:
+            raise HTTPException(400, f"SQL 包含禁止关键字: {t.value}")
+
+    # 禁止危险函数调用
+    dangerous_funcs = {"SLEEP", "BENCHMARK", "LOAD_FILE", "PG_READ_FILE", "PG_READ_BINARY_FILE", "PG_LS_DIR"}
+    for i, t in enumerate(tokens):
+        if t.normalized in dangerous_funcs:
+            # 检查下一个非空白 token 是否是左括号，确认是函数调用而非字符串内容
+            if i + 1 < len(tokens) and tokens[i + 1].value == "(":
+                raise HTTPException(400, f"SQL 包含危险函数: {t.value}")
+
+
 def _run_sql(db: Session, datasource_id: int, sql: str):
     """复用的 SQL 执行逻辑，返回 dict。仅允许只读 SELECT。"""
     from app.models.datasource import DataSource
     import sqlalchemy as sa
 
-    # 只允许 SELECT 语句，禁止 DDL/DML
-    stripped = sql.strip().upper()
-    if not stripped.startswith("SELECT"):
-        raise HTTPException(400, "仅允许 SELECT 查询语句")
-    # 禁止多语句（分号）
-    if ";" in sql:
-        raise HTTPException(400, "不允许包含分号")
+    _validate_sql_safe(sql)
 
     ds = db.query(DataSource).filter(DataSource.id == datasource_id).first()
     if not ds:
@@ -191,7 +227,7 @@ def _run_sql(db: Session, datasource_id: int, sql: str):
                     "duration_ms": duration_ms,
                 }
             else:
-                conn.commit()
+                conn.rollback()  # SELECT 不需要 commit；防御被绕过时也兜底不提交
                 return {
                     "type": "rowcount",
                     "affected": res.rowcount,
@@ -724,17 +760,26 @@ def run_component(
     elif c.type in ("python", "shell"):
         # 安全沙箱校验
         if c.type == "shell":
-            # 1. 禁止 shell 元字符：管道、重定向、命令替换、逻辑运算符、分号、换行
-            if re.search(r"[;|&<>{}()$`\n\r]|&&|\|\|", code):
-                raise HTTPException(400, "Shell 组件禁止包含危险字符（; | & < > { } ( ) $ ` && || 换行）")
-            # 2. 禁止危险内建命令
-            forbidden_cmds = {"eval", "exec", "source", ".", "bash", "sh", "curl", "wget", "nc", "netcat"}
-            code_lower = code.lower()
-            for cmd in forbidden_cmds:
-                # 简单词边界检查，避免误伤合法变量名
-                if re.search(rf"\b{cmd}\b", code_lower):
-                    raise HTTPException(400, f"Shell 组件禁止使用命令: {cmd}")
-            # 3. 长度限制
+            # 安全模型：shlex.split + shell=False，元字符不会被 Shell 执行。
+            # 只需检查命令名，无需过滤 $ | & 等字符。
+            try:
+                args = shlex.split(code)
+            except ValueError as e:
+                raise HTTPException(400, f"Shell 命令解析失败: {e}")
+            if not args:
+                raise HTTPException(400, "Shell 组件代码为空")
+
+            # 检查命令名（仅第一个参数，避免误伤注释/字符串中的命令名）
+            cmd_name = os.path.basename(args[0]).lower()
+            forbidden_cmds = {
+                "eval", "exec", "source", ".", "bash", "sh",
+                "curl", "wget", "nc", "netcat",
+                "python3", "python", "perl", "ruby", "lua",
+            }
+            if cmd_name in forbidden_cmds:
+                raise HTTPException(400, f"Shell 组件禁止使用命令: {cmd_name}")
+
+            # 长度限制
             if len(code) > 10000:
                 raise HTTPException(400, "Shell 组件代码超过 10000 字符限制")
         elif c.type == "python":
@@ -807,6 +852,51 @@ def test_component(
     ctx = build_param_context(c.params or [], req.runtime_params)
     cfg = substitute_config(cfg, ctx, c.type)
 
+    # === 实际验证 ===
+    code = cfg.get("sql") or cfg.get("script", "")
+
+    if c.type == "sql":
+        if not code:
+            raise HTTPException(400, "SQL 代码为空")
+        import sqlparse
+        try:
+            parsed = sqlparse.parse(code)
+            if not parsed:
+                raise HTTPException(400, "SQL 解析失败")
+        except Exception as e:
+            raise HTTPException(400, f"SQL 语法错误: {e}")
+
+    elif c.type == "python":
+        if not code:
+            raise HTTPException(400, "Python 代码为空")
+        try:
+            tree = ast.parse(code)
+        except SyntaxError as e:
+            raise HTTPException(400, f"Python 语法错误: {e}")
+        _validate_python_ast(tree)
+
+    elif c.type == "shell":
+        if not code:
+            raise HTTPException(400, "Shell 代码为空")
+        try:
+            args = shlex.split(code)
+        except ValueError as e:
+            raise HTTPException(400, f"Shell 命令解析失败: {e}")
+        if not args:
+            raise HTTPException(400, "Shell 命令为空")
+        cmd_name = os.path.basename(args[0]).lower()
+        forbidden_cmds = {
+            "eval", "exec", "source", ".", "bash", "sh",
+            "curl", "wget", "nc", "netcat",
+            "python3", "python", "perl", "ruby", "lua",
+        }
+        if cmd_name in forbidden_cmds:
+            raise HTTPException(400, f"Shell 组件禁止使用命令: {cmd_name}")
+
+    elif c.type == "datax":
+        if not cfg.get("source_id") or not cfg.get("target_id"):
+            raise HTTPException(400, "DataX 组件缺少 source_id 或 target_id")
+
     c.status = STATUS_TESTED
     db.commit()
     db.refresh(c)
@@ -850,7 +940,7 @@ def quick_publish_component(
 
 
 @router.post("/{comp_id}/publish-as-workflow")
-async def publish_component_as_workflow(
+def publish_component_as_workflow(
     comp_id: int,
     db: Session = Depends(get_db),
     current_user: SysUser = Depends(require_permission("component:publish")),
@@ -904,10 +994,16 @@ async def publish_component_as_workflow(
     from app.models.workflow import Workflow
     from app.models.resource_access import SysResourceAccess
 
-    # 查找已有 Workflow（通过 steps_json 引用 component_id）
-    wf = db.query(Workflow).filter(
-        Workflow.steps_json.contains(f'"component_id": {c.id}'),
-    ).first()
+    # 查找已有 Workflow（精确匹配 steps_json 中的 component_id）
+    all_wfs = db.query(Workflow).all()
+    wf = None
+    for w in all_wfs:
+        for step in (w.steps_json or []):
+            if step.get("component_id") == c.id:
+                wf = w
+                break
+        if wf:
+            break
 
     if wf:
         wf.steps_json = [{"component_id": c.id, "name": c.name}]
@@ -938,28 +1034,21 @@ async def publish_component_as_workflow(
 
     db.flush()
 
-    from app.api.workflow import _sync_to_ds
-    pd_code = None
-    try:
-        pd_code, schedule_id = await _sync_to_ds(db, wf)
-        wf.ds_process_code = pd_code
-        wf.ds_schedule_id = schedule_id
-        wf.status = "online"
-    except Exception as e:
-        db.rollback()
-        if pd_code:
-            from app.core.ds_client import get_ds_client
-            try:
-                await get_ds_client().delete_process_definition(pd_code)
-            except Exception as cleanup_err:
-                import logging
-                logging.getLogger(__name__).warning("DS cleanup failed after publish error: %s", cleanup_err)
-        raise HTTPException(status_code=502, detail=f"DS 同步失败：{e}")
+    from app.api.workflow import _enqueue_sync
+    record = _enqueue_sync(db, wf.id, "publish")
 
+    # 乐观更新本地状态（与工作流发布保持一致）
+    wf.status = STATUS_ONLINE
+    wf.schedule_status = "ONLINE"
     db.commit()
+    db.refresh(wf)
+
     return {
         "component_id": c.id,
         "workflow_id": wf.id,
+        "message": "已提交发布队列，后台同步中",
+        "sync_status": record.status,
+        "queue_id": record.id,
         "ds_process_code": wf.ds_process_code,
     }
 

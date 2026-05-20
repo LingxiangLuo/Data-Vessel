@@ -25,7 +25,7 @@ function reportFrontendError(level: 'error' | 'warn' | 'info', message: string, 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
         keepalive: true,
-      }).catch(() => {})
+      }).catch((e: any) => console.error(e))
     }
   } catch {
     // 上报失败静默处理，避免递归

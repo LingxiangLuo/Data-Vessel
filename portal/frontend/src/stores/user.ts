@@ -44,7 +44,7 @@ export const useUserStore = defineStore('user', () => {
   }
 
   async function logout() {
-    try { await logoutApi() } catch {}
+    try { await logoutApi() } catch (e: any) { console.error(e) }
     userInfo.value = null
     permissions.value = []
   }

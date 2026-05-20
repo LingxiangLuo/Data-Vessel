@@ -687,14 +687,14 @@ async function handleSave() {
     modalVisible.value = false
     loadData()
     loadStats()
-  } catch {}
+  } catch (e: any) { console.error(e) }
 }
 
 async function handleToggle(r: Rule) {
   try {
     await toggleDqcRule(r.id)
     loadData()
-  } catch {}
+  } catch (e: any) { console.error(e) }
 }
 
 async function handleCheck(r: Rule) {
@@ -729,7 +729,7 @@ function handleDelete(r: Rule) {
     title: '删除规则',
     content: `确认删除「${r.name}」?`,
     onOk: async () => {
-      try { await deleteDqcRule(r.id); Message.success('已删除'); loadData() } catch {}
+      try { await deleteDqcRule(r.id); Message.success('已删除'); loadData() } catch (e: any) { console.error(e); Message.error((e as any).message || '操作失败') }
     },
   })
 }

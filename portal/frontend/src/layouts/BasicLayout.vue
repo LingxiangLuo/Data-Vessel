@@ -227,7 +227,7 @@ async function loadNotifs() {
     const res: any = await getNotifications({ pageSize: 5 })
     notifList.value = res?.list || []
     unreadCount.value = res?.unread || 0
-  } catch {}
+  } catch (e: any) { console.error(e) }
 }
 
 function onNotifToggle(visible: boolean) {

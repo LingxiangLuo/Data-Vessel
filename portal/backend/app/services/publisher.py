@@ -111,11 +111,36 @@ class WorkflowPublisher:
                 continue
             ds_list = await self.ds.list_datasources(page_size=200)
             matched = next((x for x in ds_list if x.get("name") == ds_obj.name), None)
-            if matched:
-                ds_obj.ds_datasource_id = matched.get("id")
-                continue
             from app.core.encrypt import decrypt_password
             plain_password = decrypt_password(ds_obj.password) or ""
+            if matched:
+                ds_id = matched.get("id")
+                # 对比关键配置字段，不一致则更新 DS 侧
+                ds_port = matched.get("port") or 0
+                if (
+                    matched.get("type") != ds_obj.type.upper()
+                    or matched.get("host") != ds_obj.host
+                    or int(ds_port) != int(ds_obj.port or 0)
+                    or matched.get("database") != ds_obj.database_name
+                    or matched.get("userName") != ds_obj.username
+                ):
+                    ok = await self.ds.update_datasource(
+                        ds_id=ds_id,
+                        name=ds_obj.name,
+                        ds_type=ds_obj.type,
+                        host=ds_obj.host,
+                        port=ds_obj.port or 0,
+                        database=ds_obj.database_name,
+                        username=ds_obj.username or "",
+                        password=plain_password,
+                    )
+                    if not ok:
+                        raise HTTPException(
+                            status_code=502,
+                            detail=f"数据源 '{ds_obj.name}' 在 DS 中的配置已变更，同步更新失败"
+                        )
+                ds_obj.ds_datasource_id = ds_id
+                continue
             new_id = await self.ds.create_datasource(
                 name=ds_obj.name,
                 ds_type=ds_obj.type,

@@ -387,7 +387,7 @@ async function handleSave() {
     }
     editorVisible.value = false
     loadData()
-  } catch {}
+  } catch (e: any) { console.error(e) }
 }
 
 function testComp(c: Comp) {
@@ -399,7 +399,7 @@ function testComp(c: Comp) {
         await testComponent(c.id)
         Message.success('测试通过')
         loadData()
-      } catch {}
+      } catch (e: any) { console.error(e) }
     },
   })
 }
@@ -413,7 +413,7 @@ function publishComp(c: Comp) {
         await publishComponent(c.id)
         Message.success('已发布')
         loadData()
-      } catch {}
+      } catch (e: any) { console.error(e) }
     },
   })
 }
@@ -427,7 +427,7 @@ function offlineComp(c: Comp) {
         await offlineComponent(c.id)
         Message.success('已下线')
         loadData()
-      } catch {}
+      } catch (e: any) { console.error(e) }
     },
   })
 }
@@ -440,7 +440,7 @@ function runComp(c: Comp) {
       try {
         await runComponent(c.id)
         Message.success('已触发运行')
-      } catch {}
+      } catch (e: any) { console.error(e) }
     },
   })
 }
@@ -454,7 +454,7 @@ function deleteComp(c: Comp) {
         await deleteComponent(c.id)
         Message.success('已删除')
         loadData()
-      } catch {}
+      } catch (e: any) { console.error(e) }
     },
   })
 }

@@ -210,11 +210,11 @@ onMounted(async () => {
   try {
     const res: any = await getDashboardStats()
     Object.assign(stats, res)
-  } catch {}
+  } catch (e: any) { console.error(e) }
   try {
     const res: any = await getDSInstances({ pageSize: 5, pageNo: 1 })
     recentRuns.value = res?.totalList?.slice(0, 5) || []
-  } catch {}
+  } catch (e: any) { console.error(e) }
 })
 
 onUnmounted(() => {

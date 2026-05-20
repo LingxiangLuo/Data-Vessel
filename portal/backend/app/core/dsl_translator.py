@@ -107,7 +107,15 @@ def translate_component_to_task(
             ds_datasource_id = getattr(ds_obj, "ds_datasource_id", None)
         sql_text = cfg.get("sql", "")
         # 判断 SQL 类型: SELECT 为 query(0),其他为 non-query(1)
-        sql_type = "0" if sql_text.strip().lower().startswith("select") else "1"
+        # 先用 sqlparse 移除注释，避免 /* comment */ SELECT 被误判
+        import sqlparse
+        parsed = sqlparse.parse(sql_text)
+        first_token = None
+        for token in parsed[0].flatten() if parsed else []:
+            if not token.is_whitespace and token.ttype not in sqlparse.tokens.Comment:
+                first_token = token
+                break
+        sql_type = "0" if (first_token and first_token.normalized == "SELECT") else "1"
         base["taskType"] = "SQL"
         base["taskParams"] = {
             "type": ds_type,

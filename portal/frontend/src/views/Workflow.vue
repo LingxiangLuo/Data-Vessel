@@ -226,7 +226,7 @@ function testWf(w: Workflow) {
     title: '测试工作流',
     content: '将检查所有组件状态并触发试运行,确认?',
     onOk: async () => {
-      try { await testWorkflow(w.id); Message.success('测试通过'); loadData() } catch {}
+      try { await testWorkflow(w.id); Message.success('测试通过'); loadData() } catch (e: any) { console.error(e); Message.error((e as any).message || '操作失败') }
     },
   })
 }
@@ -236,7 +236,7 @@ function publishWf(w: Workflow) {
     title: '发布工作流',
     content: `「${w.name}」将发布上线,确认?`,
     onOk: async () => {
-      try { await publishWorkflow(w.id); Message.success('已发布'); loadData() } catch {}
+      try { await publishWorkflow(w.id); Message.success('已发布'); loadData() } catch (e: any) { console.error(e); Message.error((e as any).message || '操作失败') }
     },
   })
 }
@@ -246,7 +246,7 @@ function offlineWf(w: Workflow) {
     title: '下线工作流',
     content: `确认下线「${w.name}」?调度也会自动停止`,
     onOk: async () => {
-      try { await offlineWorkflow(w.id); Message.success('已下线'); loadData() } catch {}
+      try { await offlineWorkflow(w.id); Message.success('已下线'); loadData() } catch (e: any) { console.error(e); Message.error((e as any).message || '操作失败') }
     },
   })
 }
@@ -256,7 +256,7 @@ function runWf(w: Workflow) {
     title: '手动运行',
     content: `立即运行「${w.name}」?`,
     onOk: async () => {
-      try { await runWorkflow(w.id); Message.success('已触发运行'); loadData() } catch {}
+      try { await runWorkflow(w.id); Message.success('已触发运行'); loadData() } catch (e: any) { console.error(e); Message.error((e as any).message || '操作失败') }
     },
   })
 }
@@ -267,7 +267,7 @@ function scheduleOn(w: Workflow) {
     title: '开启调度',
     content: `按 CRON「${w.cron_expression}」开启自动调度?`,
     onOk: async () => {
-      try { await scheduleWorkflowOnline(w.id); Message.success('调度已开启'); loadData() } catch {}
+      try { await scheduleWorkflowOnline(w.id); Message.success('调度已开启'); loadData() } catch (e: any) { console.error(e); Message.error((e as any).message || '操作失败') }
     },
   })
 }
@@ -277,7 +277,7 @@ function scheduleOff(w: Workflow) {
     title: '关闭调度',
     content: `关闭「${w.name}」的自动调度?`,
     onOk: async () => {
-      try { await scheduleWorkflowOffline(w.id); Message.success('调度已关闭'); loadData() } catch {}
+      try { await scheduleWorkflowOffline(w.id); Message.success('调度已关闭'); loadData() } catch (e: any) { console.error(e); Message.error((e as any).message || '操作失败') }
     },
   })
 }
@@ -287,7 +287,7 @@ function deleteWf(w: Workflow) {
     title: '删除工作流',
     content: `确认删除「${w.name}」?该操作不可恢复`,
     onOk: async () => {
-      try { await deleteWorkflow(w.id); Message.success('已删除'); loadData() } catch {}
+      try { await deleteWorkflow(w.id); Message.success('已删除'); loadData() } catch (e: any) { console.error(e); Message.error((e as any).message || '操作失败') }
     },
   })
 }

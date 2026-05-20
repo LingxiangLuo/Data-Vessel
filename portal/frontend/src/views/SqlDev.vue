@@ -720,7 +720,7 @@ async function openComp(c: ComponentItem) {
         tab.readOnly = true
         Message.warning(`组件正被 ${tab.lockedBy} 编辑，当前为只读模式`)
       }
-    } catch {}
+    } catch (e: any) { console.error(e) }
   }
 }
 
@@ -743,7 +743,7 @@ function switchTab(key: string) {
   const tab = tabs.value.find(t => t.key === key)
   if (tab?.componentId && !tab.readOnly) {
     lockHeartbeatTimer.value = setInterval(() => {
-      heartbeatComponentLock(tab.componentId!).catch(() => {})
+      heartbeatComponentLock(tab.componentId!).catch((e: any) => console.error(e))
     }, 45000)
   }
 }
@@ -754,7 +754,7 @@ async function closeTab(key: string) {
   const tab = tabs.value[idx]
   // 释放编辑锁
   if (tab.componentId && !tab.readOnly) {
-    try { await releaseComponentLock(tab.componentId) } catch {}
+    try { await releaseComponentLock(tab.componentId) } catch (e: any) { console.error(e); Message.error((e as any).message || '操作失败') }
   }
   tabs.value.splice(idx, 1)
   if (activeKey.value === key) {
@@ -789,7 +789,7 @@ async function confirmNewFolder() {
     })
     newFolderVisible.value = false
     await loadFolders()
-  } catch {}
+  } catch (e: any) { console.error(e) }
 }
 
 function startRename(node: TreeNode) {
@@ -807,7 +807,7 @@ async function submitRename(id: number) {
   try {
     await renameComponentFolder(id, renameValue.value.trim())
     await loadFolders()
-  } catch {} finally {
+  } catch (e: any) { console.error(e); Message.error((e as any).message || '操作失败') } finally {
     renamingFolderId.value = null
   }
 }
@@ -817,7 +817,7 @@ async function deleteFolder(id: number) {
     await deleteComponentFolder(id)
     await loadFolders()
     Message.success('文件夹已删除')
-  } catch {}
+  } catch (e: any) { console.error(e) }
 }
 
 // ---- 状态系统 ----
@@ -845,7 +845,7 @@ async function confirmDeleteComp(c: ComponentItem) {
     const idx = tabs.value.findIndex(t => t.componentId === c.id)
     if (idx >= 0) closeTab(tabs.value[idx].key)
     await loadComponents()
-  } catch {}
+  } catch (e: any) { console.error(e) }
 }
 
 // ---- 运行 ----
@@ -966,7 +966,7 @@ async function doSave(tab: Tab) {
     tab.dirty = false
     Message.success('已保存')
     await loadComponents()
-  } catch {} finally {
+  } catch (e: any) { console.error(e) } finally {
     saving.value = false
   }
 }
@@ -979,7 +979,7 @@ async function quickPublish() {
     await quickPublishComponent(tab.componentId!)
     Message.success('已发布上线')
     await loadComponents()
-  } catch {}
+  } catch (e: any) { console.error(e) }
 }
 
 // ---- 历史版本 ----
@@ -1012,7 +1012,7 @@ async function viewHistoryDetail(version: number) {
       code: cfg.sql || cfg.script || JSON.stringify(cfg, null, 2),
     }
     historyDetailVisible.value = true
-  } catch {}
+  } catch (e: any) { console.error(e) }
 }
 
 async function doRollback(version: number) {
@@ -1030,7 +1030,7 @@ async function doRollback(version: number) {
     tab.params = res.params || []
     tab.dqcRuleIds = res.dqc_rule_ids || []
     tab.dirty = false
-  } catch {}
+  } catch (e: any) { console.error(e) }
 }
 
 // ---- 数据加载 ----
@@ -1038,14 +1038,14 @@ async function loadFolders() {
   try {
     const res: any = await getComponentFolders()
     folders.value = res || []
-  } catch {}
+  } catch (e: any) { console.error(e) }
 }
 
 async function loadComponents() {
   try {
     const res: any = await getComponents({ page_size: 500 })
     components.value = res.items || []
-  } catch {}
+  } catch (e: any) { console.error(e) }
 }
 
 async function loadDatasources() {
@@ -1059,14 +1059,14 @@ async function loadDatasources() {
         t.datasourceId = undefined
       }
     })
-  } catch {}
+  } catch (e: any) { console.error(e) }
 }
 
 async function loadProjects() {
   try {
     const res: any = await getProjects({ page_size: 200 })
     projects.value = res.items || res || []
-  } catch {}
+  } catch (e: any) { console.error(e) }
 }
 
 // ---- 右键菜单 ----
@@ -1230,7 +1230,7 @@ async function doPaste(targetNode: TreeNode) {
         Message.success('已复制')
         await loadComponents()
         openComp(res)
-      } catch {}
+      } catch (e: any) { console.error(e) }
     } else if (cb.action === 'cut') {
       await doMoveComponent(cb.id, targetFolderId ?? 0)
       clipboard.value = null
@@ -1258,7 +1258,7 @@ async function doPaste(targetNode: TreeNode) {
         Message.success('已复制文件夹')
         await loadFolders()
         clipboard.value = null
-      } catch {}
+      } catch (e: any) { console.error(e) }
     }
   }
 }
@@ -1286,7 +1286,7 @@ async function submitRenameComp(id: number) {
     // 更新已打开 tab 的名称
     const tab = tabs.value.find(t => t.componentId === id)
     if (tab) tab.name = renameCompValue.value.trim()
-  } catch {} finally {
+  } catch (e: any) { console.error(e) } finally {
     renamingCompId.value = null
   }
 }
@@ -1468,7 +1468,7 @@ async function doMoveComponent(compId: number, folderId: number) {
     await moveComponent(compId, folderId)
     Message.success('移动成功')
     await loadComponents()
-  } catch {}
+  } catch (e: any) { console.error(e) }
 }
 
 async function doReorderBetween(dragId: number, targetId: number, dropPosition: 'before' | 'after' = 'before') {
@@ -1496,7 +1496,7 @@ async function doReorderBetween(dragId: number, targetId: number, dropPosition: 
   try {
     await reorderComponents(orders)
     await loadComponents()
-  } catch {}
+  } catch (e: any) { console.error(e) }
 }
 
 async function doMoveFolder(folderId: number, parentId: number) {
@@ -1504,7 +1504,7 @@ async function doMoveFolder(folderId: number, parentId: number) {
     await moveComponentFolder(folderId, parentId)
     Message.success('移动成功')
     await loadFolders()
-  } catch {}
+  } catch (e: any) { console.error(e) }
 }
 
 function switchToManage() {

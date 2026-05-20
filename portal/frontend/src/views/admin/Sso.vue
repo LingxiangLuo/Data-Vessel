@@ -75,7 +75,7 @@ async function loadConfigs() {
         // 不回填 secret
       }
     }
-  } catch {}
+  } catch (e: any) { console.error(e) }
 }
 
 async function save(provider: string) {

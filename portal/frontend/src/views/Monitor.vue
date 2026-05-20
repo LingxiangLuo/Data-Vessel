@@ -165,7 +165,7 @@ async function loadSysInfo() {
   try {
     const res: any = await api.get('/system/info')
     sysInfo.value = res
-  } catch {}
+  } catch (e: any) { console.error(e) }
 }
 
 async function refreshAll() {

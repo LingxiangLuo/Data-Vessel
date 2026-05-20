@@ -214,7 +214,7 @@ async function loadWorkflows() {
   try {
     const res: any = await getWorkflows({ page: 1, page_size: 200 })
     workflows.value = res?.items || []
-  } catch {}
+  } catch (e: any) { console.error(e) }
 }
 
 async function loadChannels() {
@@ -267,14 +267,14 @@ async function handleSave() {
     }
     modalVisible.value = false
     loadData()
-  } catch {}
+  } catch (e: any) { console.error(e) }
 }
 
 async function handleToggle(r: Rule) {
   try {
     await toggleAlertRule(r.id)
     loadData()
-  } catch {}
+  } catch (e: any) { console.error(e) }
 }
 
 async function handleTest(r: Rule) {
@@ -295,7 +295,7 @@ function handleDelete(r: Rule) {
     title: '删除规则',
     content: `确认删除「${r.name}」?`,
     onOk: async () => {
-      try { await deleteAlertRule(r.id); Message.success('已删除'); loadData() } catch {}
+      try { await deleteAlertRule(r.id); Message.success('已删除'); loadData() } catch (e: any) { console.error(e); Message.error((e as any).message || '操作失败') }
     },
   })
 }

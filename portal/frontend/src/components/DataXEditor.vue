@@ -371,7 +371,7 @@ async function loadDatasources() {
   try {
     const res: any = await getDatasources({ page: 1, page_size: 100 })
     datasources.value = (res.items || []).filter((d: any) => d.host && d.username)
-  } catch {}
+  } catch (e: any) { console.error(e) }
 }
 
 async function loadComp() {
@@ -414,7 +414,7 @@ async function loadComp() {
     jsonError.value = ''
     if (config.source_id && config.source_table) await loadSourceColumns()
     if (config.target_id && config.target_table) await loadTargetColumns()
-  } catch {}
+  } catch (e: any) { console.error(e) }
 }
 
 async function onSourceDsChange() {
@@ -437,7 +437,7 @@ async function onSearchSourceTable(kw: string) {
     try {
       const res: any = await getMetadataTables(config.source_id!, kw || undefined, 50)
       sourceTableOptions.value = (res.tables || []).map((t: any) => t.name)
-    } catch {}
+    } catch (e: any) { console.error(e) }
   }, 200)
 }
 
@@ -449,7 +449,7 @@ async function onSearchTargetTable(kw: string) {
     try {
       const res: any = await getMetadataTables(config.target_id!, kw || undefined, 50)
       targetTableOptions.value = (res.tables || []).map((t: any) => t.name)
-    } catch {}
+    } catch (e: any) { console.error(e) }
   }, 200)
 }
 
@@ -583,7 +583,7 @@ async function handleSave() {
     }
     comp.value = res
     emit('saved', res)
-  } catch {} finally {
+  } catch (e: any) { console.error(e) } finally {
     saving.value = false
   }
 }
@@ -596,7 +596,7 @@ async function handleOnline() {
     comp.value = { ...comp.value, status: 'online', ds_task_code: res.ds_process_code }
     Message.success('已上线并发布到 DS')
     emit('statusChanged', comp.value)
-  } catch {} finally { toggling.value = false }
+  } catch (e: any) { console.error(e) } finally { toggling.value = false }
 }
 
 async function handleOffline() {
@@ -607,7 +607,7 @@ async function handleOffline() {
     comp.value = res
     Message.success('已下线，可以编辑')
     emit('statusChanged', res)
-  } catch {} finally { toggling.value = false }
+  } catch (e: any) { console.error(e); Message.error((e as any).message || '操作失败') } finally { toggling.value = false }
 }
 
 // ---- 预览 ----
@@ -636,7 +636,7 @@ async function loadPreview() {
     })
     previewJson.value = JSON.stringify(res.datax, null, 2)
     previewModalVisible.value = true
-  } catch {} finally {
+  } catch (e: any) { console.error(e) } finally {
     previewing.value = false
   }
 }
@@ -665,7 +665,7 @@ async function handleAutoCreateTable() {
     ddlStatements.value = Array.isArray(res.statements) ? res.statements : [res.ddl]
     ddlTargetColumns.value = Array.isArray(res.columns) ? res.columns : []
     ddlModalVisible.value = true
-  } catch {} finally {
+  } catch (e: any) { console.error(e) } finally {
     ddlGenerating.value = false
   }
 }
@@ -696,7 +696,7 @@ async function confirmExecuteDDL() {
     } else {
       Message.error(res.message || '建表失败')
     }
-  } catch {} finally {
+  } catch (e: any) { console.error(e) } finally {
     ddlExecuting.value = false
   }
 }

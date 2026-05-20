@@ -179,7 +179,7 @@ async function handleSubmit() {
     }
     drawerVisible.value = false
     loadUsers()
-  } catch {}
+  } catch (e: any) { console.error(e) }
 }
 
 function handleDelete(user: any) {

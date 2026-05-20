@@ -91,8 +91,12 @@ class DSClient:
             # 401 重认证
             if result.get("code") in (300, 190001) and retry:
                 self._session_id = None
-                if await self._login():
-                    return await self._request(method, path, retry=False, **kwargs)
+                async with self._session_lock:
+                    # 双重检查：等待锁期间可能已有其他协程续期成功
+                    if self._session_id:
+                        return await self._request(method, path, retry=False, **kwargs)
+                    if await self._login():
+                        return await self._request(method, path, retry=False, **kwargs)
                 return None
             if result.get("code") == 0:
                 return result.get("data")
@@ -398,6 +402,33 @@ class DSClient:
         if isinstance(data, dict):
             return data.get("id")
         return None
+
+    async def update_datasource(
+        self,
+        ds_id: int,
+        name: str,
+        ds_type: str,
+        host: str,
+        port: int,
+        database: str,
+        username: str,
+        password: str,
+    ) -> bool:
+        """更新 DS 中已有数据源的配置"""
+        payload = {
+            "id": ds_id,
+            "name": name,
+            "note": "Auto-synced from Portal",
+            "type": ds_type.upper(),
+            "host": host,
+            "port": port,
+            "database": database,
+            "userName": username,
+            "password": password,
+            "connectType": None,
+        }
+        data = await self.put("/datasources", json_data=payload)
+        return isinstance(data, dict) and data.get("id") == ds_id
 
     async def close(self):
         if self._client is not None:

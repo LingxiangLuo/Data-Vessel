@@ -179,7 +179,7 @@ async function handleSave() {
 function handleDelete(r: any) {
   Modal.confirm({
     title: '删除词根', content: `确认删除「${r.en}」?`,
-    onOk: async () => { try { await deleteWordRoot(r.id); Message.success('已删除'); loadData() } catch {} },
+    onOk: async () => { try { await deleteWordRoot(r.id); Message.success('已删除'); loadData() } catch (e: any) { console.error(e); Message.error((e as any).message || '操作失败') } },
   })
 }
 
@@ -202,7 +202,7 @@ function doSuggest() {
       const res: any = await suggestNaming(suggestInput.value)
       suggestResult.value = res.suggestion || ''
       suggestMatches.value = res.matches || []
-    } catch {}
+    } catch (e: any) { console.error(e) }
   }, 300)
 }
 

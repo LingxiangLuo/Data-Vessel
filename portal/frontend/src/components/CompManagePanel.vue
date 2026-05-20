@@ -324,7 +324,7 @@ function runComp(c: ComponentItem) {
     title: '运行组件',
     content: `立即运行「${c.name}」？`,
     onOk: async () => {
-      try { await runComponent(c.id); Message.success('已触发运行') } catch {}
+      try { await runComponent(c.id); Message.success('已触发运行') } catch (e: any) { Message.error(e.message || '运行失败') }
     },
   })
 }
@@ -334,7 +334,7 @@ function testComp(c: ComponentItem) {
     title: '测试组件',
     content: `「${c.name}」测试通过后状态将转为已测试，确认？`,
     onOk: async () => {
-      try { await testComponent(c.id); Message.success('测试通过'); loadData(); emit('refresh') } catch {}
+      try { await testComponent(c.id); Message.success('测试通过'); loadData(); emit('refresh') } catch (e: any) { Message.error(e.message || '测试失败') }
     },
   })
 }
@@ -344,7 +344,7 @@ function publishComp(c: ComponentItem) {
     title: '发布组件',
     content: `「${c.name}」将发布上线，确认？`,
     onOk: async () => {
-      try { await publishComponent(c.id); Message.success('已发布'); loadData(); emit('refresh') } catch {}
+      try { await publishComponent(c.id); Message.success('已发布'); loadData(); emit('refresh') } catch (e: any) { Message.error(e.message || '发布失败') }
     },
   })
 }
@@ -354,7 +354,7 @@ function quickPublishComp(c: ComponentItem) {
     title: '快速发布',
     content: `「${c.name}」将跳过测试直接发布上线，确认？`,
     onOk: async () => {
-      try { await quickPublishComponent(c.id); Message.success('已快速发布'); loadData(); emit('refresh') } catch {}
+      try { await quickPublishComponent(c.id); Message.success('已快速发布'); loadData(); emit('refresh') } catch (e: any) { Message.error(e.message || '快速发布失败') }
     },
   })
 }
@@ -364,7 +364,7 @@ function offlineComp(c: ComponentItem) {
     title: '下线组件',
     content: `确认下线「${c.name}」？`,
     onOk: async () => {
-      try { await offlineComponent(c.id); Message.success('已下线'); loadData(); emit('refresh') } catch {}
+      try { await offlineComponent(c.id); Message.success('已下线'); loadData(); emit('refresh') } catch (e: any) { Message.error(e.message || '下线失败') }
     },
   })
 }
@@ -375,7 +375,7 @@ function deleteComp(c: ComponentItem) {
     content: `确认删除「${c.name}」？该操作不可恢复`,
     okButtonProps: { status: 'danger' },
     onOk: async () => {
-      try { await deleteComponent(c.id); Message.success('已删除'); loadData(); emit('refresh') } catch {}
+      try { await deleteComponent(c.id); Message.success('已删除'); loadData(); emit('refresh') } catch (e: any) { Message.error(e.message || '删除失败') }
     },
   })
 }
@@ -387,7 +387,7 @@ async function doMoveComponent(compId: number, folderId: number) {
     clipboard.value = null
     await loadData()
     emit('refresh')
-  } catch {}
+  } catch (e: any) { Message.error(e.message || '移动失败') }
 }
 
 async function doPaste(targetComp: ComponentItem) {
@@ -408,7 +408,7 @@ async function doPaste(targetComp: ComponentItem) {
       await loadData()
       emit('refresh')
       emit('open', res)
-    } catch {}
+    } catch (e: any) { Message.error(e.message || '复制失败') }
   } else if (cb.action === 'cut') {
     await doMoveComponent(cb.comp.id, targetFolderId ?? 0)
   }
@@ -421,7 +421,7 @@ function doRename(c: ComponentItem) {
     Message.success('已重命名')
     loadData()
     emit('refresh')
-  }).catch(() => {})
+  }).catch((e: any) => Message.error(e.message || '重命名失败'))
 }
 
 // ---- 拖拽 ----
