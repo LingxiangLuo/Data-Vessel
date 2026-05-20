@@ -20,6 +20,7 @@ def run_all_migrations():
     _migrate_workflow_service_token()
     _migrate_performance_indexes()
     _migrate_ds_task_log_table()
+    _migrate_workflow_sync_queue_table()
     _migrate_foreign_keys()
 
 
@@ -388,6 +389,31 @@ def _migrate_ds_task_log_table():
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                     INDEX ix_process_instance_id (process_instance_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """))
+            conn.commit()
+
+
+def _migrate_workflow_sync_queue_table():
+    with engine.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT TABLE_NAME FROM information_schema.TABLES "
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'workflow_sync_queue'"
+        )).fetchall()
+        if not rows:
+            conn.execute(text("""
+                CREATE TABLE workflow_sync_queue (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    workflow_id BIGINT NOT NULL,
+                    action VARCHAR(32) NOT NULL COMMENT 'publish/online/offline/delete',
+                    status VARCHAR(32) NOT NULL DEFAULT 'pending' COMMENT 'pending/processing/success/failed',
+                    retry_count INT NOT NULL DEFAULT 0,
+                    max_retries INT NOT NULL DEFAULT 3,
+                    error_message TEXT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    completed_at DATETIME NULL,
+                    INDEX ix_workflow_id (workflow_id)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
             """))
             conn.commit()

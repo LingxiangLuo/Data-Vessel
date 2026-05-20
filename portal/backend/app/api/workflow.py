@@ -17,6 +17,7 @@ from app.models.component import Component
 from app.models.datasource import DataSource
 from app.models.dqc_rule import DqcRule
 from app.models.user import SysUser
+from app.models.workflow_sync_queue import WorkflowSyncQueue
 
 router = APIRouter(prefix="/workflows", tags=["工作流"])
 
@@ -181,17 +182,31 @@ def _validate_steps(db: Session, steps: List[WorkflowStep]) -> List[Dict[str, An
     return out
 
 
-async def _sync_to_ds(db: Session, w: Workflow) -> tuple:
-    """把 workflow 翻译并同步到 DS（支持 DAG 和线性两种模式）。
+def _enqueue_sync(db: Session, workflow_id: int, action: str) -> WorkflowSyncQueue:
+    """将 DS 同步操作写入 outbox 队列；已存在 pending/processing 的同名任务则直接返回。"""
+    existing = (
+        db.query(WorkflowSyncQueue)
+        .filter(
+            WorkflowSyncQueue.workflow_id == workflow_id,
+            WorkflowSyncQueue.action == action,
+            WorkflowSyncQueue.status.in_(["pending", "processing"]),
+        )
+        .first()
+    )
+    if existing:
+        return existing
+    record = WorkflowSyncQueue(
+        workflow_id=workflow_id,
+        action=action,
+        status="pending",
+        retry_count=0,
+        max_retries=3,
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return record
 
-    两步发布：先 publish 创建 OFFLINE 的 process definition 并持久化 Portal 记录，
-    再 online 上线。失败时 Portal 记录仍保留 ds_process_code，支持重试上线。
-    """
-    from app.services.publisher import WorkflowPublisher
-    publisher = WorkflowPublisher(db)
-    pd_code, schedule_id = await publisher.publish(w)
-    await publisher.online(pd_code)
-    return pd_code, schedule_id
 
 
 # ===== 运行信息同步 =====
@@ -495,16 +510,9 @@ async def delete_workflow(
             status_code=400,
             detail=f"工作流状态 {w.status},只有 draft/offline 状态允许删除;请先下线",
         )
-    # 先清理 DS 资源；失败时抛出异常，避免 DS 侧产生孤儿资源
-    if w.ds_schedule_id:
-        ds = get_ds_client()
-        await ds.schedule_offline(w.ds_schedule_id)
-        await ds.delete_schedule(w.ds_schedule_id)
-    if w.ds_process_code:
-        ds = get_ds_client()
-        await ds.release_process_definition(w.ds_process_code, online=False)
-        await ds.delete_process_definition(w.ds_process_code)
-    # 清理 ACL 记录，避免孤儿行影响 has_any 判断
+    # 入队 DS 资源清理任务，后台异步执行
+    _enqueue_sync(db, w.id, "delete")
+    # 立即清理本地记录
     from app.models.resource_access import SysResourceAccess
     db.query(SysResourceAccess).filter(
         SysResourceAccess.resource_type == "workflow",
@@ -520,7 +528,7 @@ async def delete_workflow(
             db.query(SyncTask).filter(SyncTask.component_id == cid).delete(synchronize_session=False)
     db.delete(w)
     db.commit()
-    return {"message": "删除成功"}
+    return {"message": "删除成功，DS 资源清理将在后台执行"}
 
 
 # ===== 状态机操作 =====
@@ -571,7 +579,7 @@ async def publish_workflow(
     db: Session = Depends(get_db),
     current_user: SysUser = Depends(require_permission("workflow:publish")),
 ):
-    """发布工作流 — tested 才能发布,真正同步到 DS"""
+    """发布工作流 — tested 才能发布,入队后台异步同步到 DS"""
     w = _get_or_404(db, wf_id)
     if not check_resource_permission(db, current_user, "workflow", wf_id, "write"):
         raise HTTPException(status_code=404, detail="工作流不存在")
@@ -580,13 +588,13 @@ async def publish_workflow(
             status_code=400,
             detail=f"只有 tested 状态可发布,当前 {w.status},请先测试",
         )
-    pd_code, schedule_id = await _sync_to_ds(db, w)
-    w.ds_process_code = pd_code
-    w.ds_schedule_id = schedule_id
-    w.status = STATUS_ONLINE
-    db.commit()
-    db.refresh(w)
-    return {"message": "已发布并同步到 DS", **_serialize(w, db)}
+    record = _enqueue_sync(db, w.id, "publish")
+    return {
+        "message": "已提交发布队列，后台同步中",
+        "sync_status": record.status,
+        "queue_id": record.id,
+        **_serialize(w, db),
+    }
 
 
 @router.post("/{wf_id}/offline")
@@ -600,24 +608,18 @@ async def offline_workflow(
         raise HTTPException(status_code=404, detail="工作流不存在")
     if w.status != STATUS_ONLINE:
         raise HTTPException(status_code=400, detail=f"只有 online 状态可下线,当前 {w.status}")
-    # 同步下线 DS 调度 + process definition
-    if w.ds_schedule_id:
-        try:
-            ds = get_ds_client()
-            await ds.schedule_offline(w.ds_schedule_id)
-        except Exception as e:
-            logging.getLogger(__name__).warning("DS schedule offline failed: %s", e)
-    if w.ds_process_code:
-        try:
-            ds = get_ds_client()
-            await ds.release_process_definition(w.ds_process_code, online=False)
-        except Exception as e:
-            logging.getLogger(__name__).warning("DS release offline failed: %s", e)
+    record = _enqueue_sync(db, w.id, "offline")
+    # 乐观更新本地状态
     w.status = STATUS_OFFLINE
     w.schedule_status = "OFFLINE"
     db.commit()
     db.refresh(w)
-    return {"message": "已下线 (DS 已同步)", **_serialize(w, db)}
+    return {
+        "message": "已提交下线队列，后台同步中",
+        "sync_status": record.status,
+        "queue_id": record.id,
+        **_serialize(w, db),
+    }
 
 
 @router.post("/{wf_id}/run")
@@ -779,23 +781,17 @@ async def schedule_online(
         raise HTTPException(status_code=400, detail="工作流需先发布上线才能开启调度")
     if not w.cron_expression:
         raise HTTPException(status_code=400, detail="未配置 cron 表达式,请先编辑")
-    if not w.ds_schedule_id:
-        # 没有 schedule 就创建一个
-        if not w.ds_process_code:
-            raise HTTPException(status_code=400, detail="工作流未同步到 DS")
-        ds = get_ds_client()
-        sid = await ds.create_schedule(w.ds_process_code, _to_6_field_cron(w.cron_expression))
-        if not sid:
-            raise HTTPException(status_code=502, detail="DS 创建调度失败")
-        w.ds_schedule_id = sid
-    ds = get_ds_client()
-    ok = await ds.schedule_online(w.ds_schedule_id)
-    if not ok:
-        raise HTTPException(status_code=502, detail="DS 上线调度失败")
+    record = _enqueue_sync(db, w.id, "online")
+    # 乐观更新本地状态
     w.schedule_status = "ONLINE"
     db.commit()
     db.refresh(w)
-    return {"message": "调度已开启", **_serialize(w, db)}
+    return {
+        "message": "已提交调度上线队列，后台同步中",
+        "sync_status": record.status,
+        "queue_id": record.id,
+        **_serialize(w, db),
+    }
 
 
 @router.post("/{wf_id}/schedule/offline")
@@ -807,16 +803,59 @@ async def schedule_offline(
     w = _get_or_404(db, wf_id)
     if not check_resource_permission(db, current_user, "workflow", wf_id, "write"):
         raise HTTPException(status_code=404, detail="工作流不存在")
-    if w.ds_schedule_id:
-        try:
-            ds = get_ds_client()
-            await ds.schedule_offline(w.ds_schedule_id)
-        except Exception:
-            pass
+    if w.status != STATUS_ONLINE:
+        raise HTTPException(status_code=400, detail="工作流需先发布上线才能操作调度")
+    if not w.ds_schedule_id:
+        raise HTTPException(status_code=400, detail="工作流未配置调度")
+    record = _enqueue_sync(db, w.id, "release_schedule")
     w.schedule_status = "OFFLINE"
     db.commit()
     db.refresh(w)
-    return {"message": "调度已关闭", **_serialize(w, db)}
+    return {
+        "message": "已提交调度下线队列，后台同步中",
+        "sync_status": record.status,
+        "queue_id": record.id,
+        **_serialize(w, db),
+    }
+
+
+@router.get("/{wf_id}/sync-status")
+def get_sync_status(
+    wf_id: int,
+    db: Session = Depends(get_db),
+    current_user: SysUser = Depends(get_current_user),
+):
+    """查询工作流的后台同步状态"""
+    w = _get_or_404(db, wf_id)
+    if not check_resource_permission(db, current_user, "workflow", wf_id, "read"):
+        raise HTTPException(status_code=404, detail="工作流不存在")
+    records = (
+        db.query(WorkflowSyncQueue)
+        .filter(WorkflowSyncQueue.workflow_id == wf_id)
+        .order_by(WorkflowSyncQueue.created_at.desc())
+        .limit(5)
+        .all()
+    )
+    return {
+        "workflow_id": wf_id,
+        "status": w.status,
+        "schedule_status": w.schedule_status,
+        "ds_process_code": w.ds_process_code,
+        "ds_schedule_id": w.ds_schedule_id,
+        "pending_actions": [
+            {
+                "id": r.id,
+                "action": r.action,
+                "status": r.status,
+                "retry_count": r.retry_count,
+                "max_retries": r.max_retries,
+                "error_message": r.error_message,
+                "created_at": str(r.created_at) if r.created_at else None,
+                "completed_at": str(r.completed_at) if r.completed_at else None,
+            }
+            for r in records
+        ],
+    }
 
 
 @router.post("/cron-preview")

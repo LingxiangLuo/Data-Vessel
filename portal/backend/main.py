@@ -40,6 +40,7 @@ from app.models.dqc_rule import DqcRule  # noqa: F401
 from app.models.dqc_check import DqcCheck  # noqa: F401
 from app.models.dqc_report import DqcReport, DqcReportHistory  # noqa: F401
 from app.models.ds_task_log import DSTaskLog  # noqa: F401
+from app.models.workflow_sync_queue import WorkflowSyncQueue  # noqa: F401
 
 # 数据库迁移：优先使用 Alembic
 import subprocess
@@ -274,10 +275,12 @@ async def lifespan(app: FastAPI):
     import asyncio
     from app.core.dqc_scheduler import start_scheduler, shutdown_scheduler
     from app.core.ds_log_scheduler import start_log_scheduler, shutdown_log_scheduler
+    from app.core.workflow_sync_scheduler import start_sync_scheduler, shutdown_sync_scheduler
     from app.core.security import _cleanup_expired_tokens
 
     start_scheduler()
     start_log_scheduler()
+    start_sync_scheduler()
 
     # 启动时种子数据（只执行一次）
     await asyncio.to_thread(_seed_roles_and_permissions)
@@ -303,6 +306,7 @@ async def lifespan(app: FastAPI):
         pass
     shutdown_scheduler()
     shutdown_log_scheduler()
+    shutdown_sync_scheduler()
 
 
 app = FastAPI(
