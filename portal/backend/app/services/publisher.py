@@ -42,7 +42,7 @@ class WorkflowPublisher:
         datasource_map = await self._sync_datasources(comps)
         dqc_rules_lookup, dqc_count = self._collect_dqc_rules(comps)
         task_codes = await self._allocate_task_codes(node_count, dqc_count)
-        svc_token = self._ensure_service_token(w, dqc_count)
+        svc_token = await self._ensure_service_token(w, dqc_count)
         payload = self._translate(w, comp_map, task_codes, datasource_map, dqc_rules_lookup, svc_token)
         pd_code = await self._upsert_process_definition(w, payload)
         schedule_id = await self._upsert_schedule(w, pd_code)
