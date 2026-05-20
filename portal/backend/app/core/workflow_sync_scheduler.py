@@ -41,10 +41,6 @@ async def _do_publish(db: Session, record: WorkflowSyncQueue) -> None:
     old_schedule_id = workflow.ds_schedule_id
     old_pd_code = workflow.ds_process_code
 
-    # 清空 DB 引用，让 publisher 重新创建（不删除 DS 侧，避免创建失败后无法回查）
-    workflow.ds_schedule_id = None
-    workflow.ds_process_code = None
-
     publisher = WorkflowPublisher(db)
     pd_code, schedule_id = await publisher.publish(workflow)
     if not pd_code:
