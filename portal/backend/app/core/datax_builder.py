@@ -173,23 +173,35 @@ def build_datax_job(
     reader = {"name": _reader_name(source_ds), "parameter": reader_param}
 
     # ---- writer ----
+    target_type = (target_ds.type or "").lower()
     writer_param: Dict[str, Any] = {
         "username": target_ds.username or "",
         "password": _pw(target_ds.password),
         "column": writer_columns,
         "connection": [{
-            "jdbcUrl": _jdbc_url(target_ds),
+            # DataX 规范：writer jdbcUrl 也必须是列表
+            "jdbcUrl": [_jdbc_url(target_ds)],
             "table": [target_table],
         }],
     }
-    # PostgreSQL writer 不支持 writeMode 参数
-    if (target_ds.type or "").lower() != "postgresql":
-        writer_param["writeMode"] = write_mode or "insert"
+    # PostgreSQL writer 不支持 writeMode 参数；MySQL/其他用 replace 处理增量去重
+    if target_type != "postgresql":
+        effective_write_mode = write_mode or "insert"
+        # 增量同步写 MySQL 时默认用 replace，避免主键冲突
+        if sync_type == "increment" and effective_write_mode == "insert":
+            effective_write_mode = "replace"
+        writer_param["writeMode"] = effective_write_mode
 
-    # preSql / postSql：用户显式传入优先；否则全量同步自动 TRUNCATE
+    # preSql / postSql：用户显式传入优先
+    # 全量同步：自动 TRUNCATE（除非用户已传 pre_sql）
+    # 增量同步写 PostgreSQL：自动 DELETE 当天分区再 INSERT，避免主键冲突
     effective_pre = [s for s in (pre_sql or []) if s and s.strip()]
-    if not effective_pre and sync_type == "full" and truncate_before_write:
-        effective_pre = [f"TRUNCATE TABLE {target_table}"]
+    if not effective_pre:
+        if sync_type == "full" and truncate_before_write:
+            effective_pre = [f"TRUNCATE TABLE {target_table}"]
+        elif sync_type == "increment" and target_type == "postgresql" and where_clause:
+            # 用与 reader 相同的 WHERE 条件先删目标分区，再 INSERT
+            effective_pre = [f"DELETE FROM {target_table} WHERE {where_clause}"]
     if effective_pre:
         writer_param["preSql"] = effective_pre
 
