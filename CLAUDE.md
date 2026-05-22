@@ -14,28 +14,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # 前端本地开发
-cd portal/frontend && npm run dev
+cd portal/frontend && rtk npm run dev
 
 # 前端类型检查
-cd portal/frontend && npx vue-tsc --noEmit
+cd portal/frontend && rtk npx vue-tsc --noEmit
 
 # 前端构建验证
-cd portal/frontend && npx vite build
+cd portal/frontend && rtk npx vite build
 
 # 后端本地启动
 cd portal/backend && uvicorn main:app --reload --port 8000
 
 # 后端语法检查
-cd portal/backend && python3 -m compileall -q -d . -x '/\.venv/' .
+cd portal/backend && rtk err python3 -m compileall -q -d . -x '/\.venv/' .
 
 # 后端 lint（ruff）
-cd portal/backend && ruff check .
+cd portal/backend && rtk ruff check .
 
 # 后端测试（全部）
-cd portal/backend && python3 -m pytest tests/
+cd portal/backend && rtk pytest tests/
 
 # 后端测试（单个文件）
-cd portal/backend && python3 -m pytest tests/test_dsl_translator.py -v
+cd portal/backend && rtk pytest tests/test_dsl_translator.py -v
 
 # 手动部署到测试服务器（任意分支均可）
 bash scripts/deploy-to-test.sh
@@ -56,27 +56,33 @@ bash scripts/deploy-to-test.sh --force          # 强制全量重建（无缓存
 
 ## 功能开发流程
 
+需求澄清和编码阶段遵循全局 CLAUDE.md 的 Matt Pocock 流水线：
+- 需求澄清 → `/grill-with-docs`（更新 `CONTEXT.md`，按需创建 ADR）
+- 方案拆解 → `/to-prd` → `/to-issues`
+- 编码 → `/tdd`（垂直切片）；复杂 bug → `/diagnose`
+
 ```bash
 # 1. 切分支
-git checkout main && git pull origin main
-git checkout -b feat/xxx
+rtk git checkout main && rtk git pull origin main
+rtk git checkout -b feat/xxx
 
-# 2. 本地测试
-cd portal/backend && python3 -m compileall -q -d . -x '/\.venv/' .
-cd portal/backend && ruff check .
-cd portal/frontend && npm run build
+# 2. 本地验证
+cd portal/backend && rtk err python3 -m compileall -q -d . -x '/\.venv/' .
+cd portal/backend && rtk ruff check .
+cd portal/frontend && rtk npx vite build
 
 # 3. 代码审查 — 每次非平凡修改后主动触发 quick-code-reviewer
 #    3+ 文件 / auth / 新 API → deep-code-reviewer
 
 # 4. 手动部署验证
 bash scripts/deploy-to-test.sh
+#    部署完成后触发 test-engineer 验证（测试环境 http://192.168.1.3）
 
 # 5. 合并到 main
-git checkout main
-git merge feat/xxx --no-ff
-git push origin main
-git branch -d feat/xxx
+rtk git checkout main
+rtk git merge feat/xxx --no-ff
+rtk git push origin main
+rtk git branch -d feat/xxx
 ```
 
 ## CI/CD
@@ -112,7 +118,6 @@ ssh -i ~/.ssh/test_server_key root@192.168.1.3 'docker logs -f dmp-portal-api'
 
 - 修改单函数/小 bug fix → `quick-code-reviewer`（主动触发）
 - 跨 3+ 文件 / 涉及 auth/权限/数据库模型 → `deep-code-reviewer`
-- 合并前 / 发 PR 前 → `release-engineer`
 - 部署后 → `test-engineer`
 
 ## 后端约定
@@ -212,8 +217,8 @@ git config https.proxy http://127.0.0.1:7890
 
 ```bash
 # main → tag → 生产部署
-git tag -a v1.2.0 -m "feat: DQC Phase 1 + 参数系统"
-git push origin v1.2.0
+rtk git tag -a v1.2.0 -m "feat: DQC Phase 1 + 参数系统"
+rtk git push origin v1.2.0
 ```
 
 ## 回滚策略
@@ -223,6 +228,48 @@ git push origin v1.2.0
 | 部署后 5 分钟内发现严重 bug | `git revert HEAD` + 重新部署上一个 tag |
 | 数据库 migration 导致问题 | 手动执行 down-migration（需提前准备） |
 | 容器启动失败 | `docker compose down && docker compose up -d` |
+
+## Agent skills
+
+本项目已配置 Matt Pocock Engineering Skills 流水线。
+
+### 核心文档
+
+| 文档 | 位置 | 作用 |
+|------|------|------|
+| `CONTEXT.md` | 项目根目录 | 领域术语字典 |
+| `docs/adr/NNNN-title.md` | `docs/adr/` | 架构决策记录 |
+| `docs/agents/issue-tracker.md` | `docs/agents/` | issue tracker 位置 |
+| `docs/agents/triage-labels.md` | `docs/agents/` | triage 状态标签 |
+| `docs/agents/domain.md` | `docs/agents/` | 文档布局规则 |
+| `docs/agents/AGENT-BRIEF.md` | `docs/agents/` | agent brief 规范 |
+| `docs/agents/OUT-OF-SCOPE.md` | `docs/agents/` | 已拒绝方案知识库 |
+
+### 可用技能
+
+| 技能 | 触发时机 |
+|------|---------|
+| `/grill-with-docs` | 需求澄清，对齐领域语言，更新 CONTEXT.md |
+| `/tdd` | 编码实现（垂直切片测试驱动） |
+| `/diagnose` | 复杂 bug 排查 |
+| `/improve-codebase-architecture` | 架构改进（发现隐藏耦合、模块边界模糊时） |
+| `/to-issues` | 需求拆解为 issue |
+| `/to-prd` | 将需求写成 PRD |
+| `/triage` | issue 分类 |
+
+### 会话开始检查清单
+
+1. 读取 `docs/agents/issue-tracker.md` 确认 issue tracker 位置
+2. 当前目录下有没有 `CONTEXT.md`？没有则新功能开始前先 `/grill-with-docs`
+3. 有没有 `ready-for-agent` 状态的 issue？有则从那里继续
+4. 有没有未读的 handoff 文档（`$TMPDIR` 下）？有则先读
+
+### 初始化状态
+
+- [x] `docs/agents/` 目录已创建（issue-tracker、triage-labels、domain、AGENT-BRIEF、OUT-OF-SCOPE）
+- [x] `.scratch/` 本地 issue tracker 目录已创建
+- [x] `CONTEXT.md` 领域术语字典已创建
+- [ ] `docs/adr/` 待补充首个 ADR
 
 ## GitHub 下载加速
 

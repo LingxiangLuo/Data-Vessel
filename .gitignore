@@ -40,3 +40,4 @@ logs/
 # Development
 portal.db
 review_verification.md
+.scratch/

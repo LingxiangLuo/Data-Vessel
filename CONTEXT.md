@@ -1,56 +1,606 @@
 # Data-Vessel 领域上下文
 
-## 项目定位
+数据中台门户（DMP Portal），金融行业离线数据统一工作台。Portal 是唯一的控制面，DolphinScheduler 仅作为执行器。
 
-数据中台门户（DMP Portal），统一控制面，对接 DolphinScheduler 作为调度引擎。
+---
 
 ## 核心领域术语
 
-| 术语 | 英文 | 定义 |
-|------|------|------|
-| 组件 | Component | 最小开发单元，类型：sql / python / shell / datax |
-| 工作流 | Workflow | DAG 编排，由组件节点和连线组成 |
-| 发布 | Publish | 将 Portal 工作流同步到 DolphinScheduler，创建 PD + Schedule |
-| 上线 | Online | 组件/工作流状态为 online，表示已通过测试可运行 |
-| 下线 | Offline | 停用状态，不再调度 |
-| 测试 | Test | 验证组件/工作流可执行（当前部分类型为假测试，仅改状态） |
-| DQC | Data Quality Check | 数据质量校验，14 种规则类型 |
-| DSL | Domain Specific Language | Portal 内部模型到 DS TaskDefinition 的翻译 |
-| Outbox | WorkflowSyncQueue | 异步 DS 同步队列，10 秒轮询，指数退避重试 |
-| DataX | DataX | 阿里开源数据同步工具，Portal 内嵌为 SHELL 节点调用 |
-| 参数引擎 | Param Engine | ${bizdate}、${yyyymmdd} 等占位符替换系统 |
+### Component（组件）
+
+用户创建的可复用任务单元，最小开发单元。
+
+**新建流程**：用户点击"新建 SQL 组件"后，系统直接在编辑器中打开一个临时草稿标签页（类似 IDE 的 Untitled）。用户可以先写 SQL 再保存，保存时才弹出命名/选择文件夹对话框，真正创建到数据库。
+
+**保存要求**：首次保存时必须填写组件名称、选择所属文件夹、选择数据源。保存后状态为 `draft`。
+
+**类型（type）**：
+- `sql` — SQL 查询/执行
+- `python` — Python 脚本
+- `shell` — Shell 脚本
+- `datax` — 数据同步任务
+
+**配置（config_json）**：按类型不同结构不同：
+- SQL: `{ datasource_id, sql, timeout }`
+- Python/Shell: `{ script, timeout }`
+- DataX: `{ reader, writer, source_id, target_id, ... }`
+
+**参数（params）**：运行时占位符定义，如 `[{"key": "dt", "value": "${yyyymmdd-7}"}]`。与 `config_json` 的区别：`config_json` 是组件的固定配置，`params` 是每次运行可能变化的值（如日期）。执行前由参数引擎替换为实际值。
+
+**状态（status）**：`draft` → `tested` → `online` → `offline`。只有 4 个状态。
+
+**版本（version）**：每次发布自动递增。Component 有独立版本控制，修改后不会自动同步到引用它的 Workflow。
+
+**Worker 组路由**：`worker_group` 字段（`default` | `sync-worker` | `sql-worker`），控制任务在哪个 Worker 节点上执行。
+
+### Workflow（工作流）
+
+由多个 Component 组成的有向无环图（DAG）。
+
+**结构**：
+- `dag_json` — DAG 节点（Component 引用）+ 连线（edges）
+- `steps_json` — 旧版线性步骤（兼容保留）
+
+**状态（status）**：`draft` → `tested` → `online` → `offline`。
+
+**调度状态（schedule_status）**：`ONLINE` / `OFFLINE`。控制 DolphinScheduler 的定时调度开关，与 `status` 是两回事。`status=online` 表示已发布到 DS 可执行；`schedule_status=ONLINE` 表示定时调度已开启。
+
+**最大运行时间**：`max_running_time`（分钟），0 = 默认 24h（不配置时的兜底值）。
+
+### DataSource（数据源）
+
+统一的数据库连接实体。不分"来源库"/"目标库"类型，所有场景共用同一张表。用户创建后，由 Component（SQL/DataX）和 DQC Rule 引用。
+
+**测试库配置**：支持 `test_connection_info` 字段（或 `test_datasource_id` 外键），测试运行时 DSL 翻译层将数据源替换为测试库连接。
+
+### Publish（发布）
+
+将 Portal 的 Workflow 同步到 DolphinScheduler，使其可在 DS 侧执行。发布成功后 Workflow `status` 变为 `online`。
+
+发布流程包含：组件翻译为 TaskDefinition、创建工作流 ProcessDefinition、同步数据源密码、分配任务编码、设置调度规则。
+
+### DSL（翻译流水线）
+
+Portal 内部模型到 DS 原生格式的翻译层。
+- Component → DS TaskDefinition JSON
+- Workflow → DS ProcessDefinition（taskDefinitionJson + taskRelationJson）
+- DataX 不走 DS 原生 DataX 节点，翻译为 SHELL 节点 + heredoc 内嵌 JSON
+
+### Param Engine（参数引擎）
+
+执行前替换参数占位符，对标 DataWorks 调度参数体系。
+
+**两种时间基准**：
+- **`${...}`** — 基于**业务日期**（T-1，数据的日期），精度为天。支持年/月/周/天偏移。`${yyyymmdd}` 等价于 `$bizdate`。
+- **`$[...]`** — 基于**定时时间**（T，任务运行的日期），精度为秒。支持天/小时/分钟偏移。`$[yyyymmddhh24miss]` 等价于 `$cyctime`。
+
+**系统内置参数**：
+- `$bizdate` — 业务日期，`yyyymmdd` 格式
+- `$cyctime` — 定时时间，`yyyymmddhh24miss` 格式
+- `$gmtdate` — 当前日期，`yyyymmdd` 格式
+- `$bizmonth` — 业务月份，有特殊逻辑：若业务日期与当前时间同月则取上月，否则取业务日期所在月
+
+**偏移计算**：
+- `${yyyymmdd-7}` — 业务日期前 7 天
+- `$[yyyymmdd-1]` — 定时时间前 1 天
+- `$[hh24-1/24]` — 定时时间前 1 小时
+- `$[mi-15/24/60]` — 定时时间前 15 分钟
+
+**高级用法**：
+- **字符串拼接**：`${yyyymm}01` 获取月初
+- **引擎函数二次处理**：在 SQL 中用 `DATEADD`、`REPLACE` 等函数对参数返回值再加工（如获取上月最后一天）
+- **补数据场景**：手动选择业务日期后，`${...}` 基于该日期，`$[...]` 基于该日期+1 天
+
+**自定义参数**：Component 的 `params` 中定义，值可引用其他参数（按定义顺序解析，不支持前向引用）；手动运行时可传入 `runtime_overrides` 覆盖。
+
+### DQC（数据质量）
+
+对标阿里 DataWorks 的数据质量子系统。
+
+**DqcRule**：规则定义。`rule_type` 包括 `row_count`、`null_percent`、`custom_sql` 等 14 种。绑定到 DataSource + 表 + 列。
+
+**DqcCheck**：单次规则执行的结果记录。
+
+**DqcReport**：按配置定时聚合 DqcCheck 结果生成的报告。通知走邮件/飞书/钉钉/企微 Webhook。
+
+**触发方式**：组件执行时自动触发关联的 DQC 规则（`is_strong=true` 时检查结果失败会阻塞下游节点）；APScheduler 定时生成报告。
+
+### Outbox（同步队列）
+
+`WorkflowSyncQueue` — 异步 DS 同步队列。工作流发布/上线/下线等状态变更先入队，由后台调度器消费并同步到 DS。10 秒轮询，指数退避重试。
+
+---
+
+## 系统架构
+
+### DS 版本与部署策略
+
+- **目标版本**：DolphinScheduler 3.4.1（从 3.2.2 升级）
+- **升级驱动力**：稳定性修复 + 新功能（更完善的 complement API）+ CVE 安全补丁
+- **升级计划**：先在内网测试环境验证（`192.168.1.3`），确认 DS 数据迁移脚本无问题后，通知用户安排停机窗口执行升级。Portal 代码保持兼容（不依赖 3.4.1 特有 API）
+- **部署模式**：支持单机（standalone）和集群两种模式，由用户选择
+- **注册中心**：PostgreSQL JDBC 模式（`registry.type=jdbc`），替代 ZooKeeper
+- **元数据存储**：PostgreSQL（与 Portal 共用实例，独立 database）
+- **单一 DS 实例**：不存在多 DS 集群场景
+
+### 数据库存储架构
+
+同一个 PostgreSQL 实例，三个独立 database：
+- `portal_db` — Portal 业务数据
+- `dolphinscheduler` — DS 元数据
+- `ds_registry` — DS JDBC 注册中心（服务发现表）
+
+Portal **只通过 REST API 与 DS 交互**，不直接读写 DS 数据库表。解耦优先，实时性通过轮询 + 缓存解决。
+
+### Portal-DS 通信架构
+
+**命令方向（Portal → DS）**：`DSClient` 通过 REST API 直接调用 DS，完成 ProcessDefinition/Schedule 的创建、更新、上线、下线、启动实例、补数据等操作。
+
+**事件方向（DS → Portal）**：采用「DS HTTP Alert Plugin 推送 + Portal 轮询兜底」的双轨方案。
+- **实时推送**：DS 任务实例状态变更时，通过 HTTP Alert 回调 `POST /api/ds/alerts`
+- **兜底轮询**：`instance_sync_scheduler.py` 每 30-60 秒拉取 DS 实例状态，校准本地数据
+- **目标**：Portal 内展示最近运行记录、状态、日志、支持重跑，无需跳转 DS 界面
+
+---
+
+## 运行模式
+
+### 触发类型
+
+| 类型 | 用途 | 参数来源 | 数据隔离 |
+|------|------|----------|----------|
+| **schedule** | 定时调度自动生成 | 系统参数 + 组件定义 | 写生产表 |
+| **manual** | 立即执行一次 | 用户可覆盖参数 | 写生产表 |
+| **test** | 验证逻辑，不污染数据 | 用户可覆盖参数 | 写测试库（配置化临时库） |
+| **backfill** | 重跑历史/未来日期范围 | 按日期自动生成 | 写生产表 |
+
+### 测试运行隔离
+
+- 每个 `DataSource` 配置 `test_connection_info`（或 `test_datasource_id` 外键）
+- 测试运行时，DSL 翻译层将数据源替换为测试库连接
+- 测试库表结构由用户自行维护（需与生产一致）
+- 测试实例不参与成功率统计，保留 7 天后自动清理
+
+### 补数据（Backfill）方案
+
+**「当前 Workflow」**：直接调用 DS Complement API（`execType=COMPLEMENT_DATA`）。
+- DS 自动链式生成 instance（每天一个 ProcessInstance）
+- DS 自动管理日期序列和跨天依赖
+- 支持串行/并行、正序/倒序、失败策略、空跑
+
+**「当前 Workflow + 下游」**：Portal 自研实现。
+- 通过 `workflow_dependency` 表找到所有下游 Workflow
+- 按拓扑排序依次调用 DS Complement
+- 执行策略：
+  - **默认**：Workflow 间串行 + Workflow 内并行（均衡模式）
+  - **可选 1**：全串行（最保守）
+  - **可选 2**：按天并行链条（每天 A→B→C 串行，不同天并行）
+  - **不提供**：全并行（会导致下游读到上游未完成的脏数据）
+
+### 业务日期规则
+
+| trigger_type | biz_date 规则 |
+|--------------|---------------|
+| `schedule` | DS Schedule 触发的计划日期 |
+| `manual` | `CURDATE()` |
+| `test` | `CURDATE()` |
+| `backfill` | 用户选择的补数据日期 |
+
+---
+
+## 血缘系统
+
+### 组件内字段级血缘
+
+通过 SQLGlot 解析 SQL 组件，提取字段级的 source → transform → target 关系。
+
+**表结构**：
+- `lineage_node` — 字段级血缘节点（component_id, db_name, table_name, column_name, node_type, transform_logic）
+- `lineage_edge` — 字段级血缘边（from_node_id, to_node_id, transform_type, confidence, is_manual）
+
+**触发时机**：
+1. **组件保存时**（主力触发）— 实时解析 SQL，更新血缘
+2. **工作流发布时**（完整校验）— 全量重新计算，校验一致性
+3. **定时扫描**（兜底）— 后台任务周期性全量扫描
+4. **手动触发**（可选）— 用户点击「分析血缘」按钮
+
+### 跨 Workflow 依赖
+
+通过表级血缘自动发现 Workflow 之间的依赖关系。
+
+**表结构**：
+- `workflow_dependency` — 跨 Workflow 依赖（upstream_workflow_id, downstream_workflow_id, source_table, target_table, confidence, is_manual）
+
+**发现方式**：
+- **SQL 组件**：SQLGlot 直接解析，高置信度
+- **DataX 组件**：直接读取 `reader.table` / `writer.table`，高置信度
+- **Python 组件**：代码扫描 + SQLGlot，~70% 准确率
+- **Shell 组件**：正则扫描，~40% 准确率
+- **低置信度血缘**：允许用户手动纠正（`is_manual=true`）
+
+**循环依赖检测**：
+- 保存 dependency 时 — 实时防御，阻止脏数据入库
+- 补数据提交前 — 最终校验，阻止成环的补数据链执行
+- 血缘定时扫描后 — 修正遗漏，标记异常并通知管理员
+
+### HTTP API 增量同步游标
+
+- `http_api_cursor` — 记录 HTTP API 数据集成组件的增量同步游标（component_id, cursor_field, cursor_value, record_count, last_sync_at）
+
+### 血缘版本快照
+
+- `lineage_snapshot` — 保存血缘历史快照（auto_save / publish / manual），用于历史追溯和变更对比
+
+---
+
+## 实例状态同步
+
+### 表结构
+
+**workflow_instance** — 工作流运行实例（对应 DS ProcessInstance）
+- `workflow_id`, `ds_instance_id`, `ds_process_code`
+- `biz_date`, `trigger_type`, `status`
+- `start_time`, `end_time`, `duration_ms`, `params_json`
+- `complement_id` — DS Complement 批次 ID（补数据时）
+- `backfill_chain_id` — Portal 补数据链条 ID（追踪 A→B→C 补数据链）。跨 Workflow 补数据时，上游实例的 `backfill_chain_id` 透传给下游实例，形成完整追溯链条
+- `last_sync_at`, `is_synced` — 同步元数据
+
+**task_instance** — 任务运行实例（对应 DS TaskInstance）
+- `workflow_instance_id`, `component_id`, `ds_task_instance_id`, `ds_task_code`
+- `task_name`, `task_type`, `status`, `start_time`, `end_time`, `duration_ms`
+- `log_path`, `log_content`（缓存）, `log_last_line`（增量行号）
+- `worker_host`, `worker_group`
+
+### 状态映射
+
+| DS 状态 | Portal 状态 |
+|---------|-------------|
+| `SUBMITTED_SUCCESS` | `submit` |
+| `RUNNING_EXECUTION` | `running` |
+| `PAUSE` | `pause` |
+| `STOP` | `kill` |
+| `SUCCESS` | `success` |
+| `FAILURE` | `fail` |
+| `NEED_FAULT_TOLERANCE` | `timeout` |
+
+### 同步机制
+
+1. **实时推送**：DS HTTP Alert → `POST /api/ds/alerts`
+2. **兜底轮询**：`instance_sync_scheduler.py` 每 30-60 秒查询 DS `/process-instances`，对比更新本地状态
+3. **日志增量拉取**：通过 `log_last_line` 记录上次同步行号，增量拉取 DS `/log/detail`
+
+---
+
+## 编辑锁
+
+完整优化方案，对标 DataWorks：
+
+- **TTL 降低**：60s（原 300s），心跳保持 45s，崩溃后最多等待 60s 自动释放
+- **锁状态查询**：显示锁定者用户名、锁定时间、剩余时间
+- **强制解锁**：admin 可释放他人锁，锁所有者也可主动释放
+- **过期提醒**：锁剩余 30s 时前端弹窗提示「点击续期」
+- **申请编辑**：向锁定者发送消息/通知请求释放锁
+- **只读同步**：查看锁定者正在编辑的内容（类似 Google Docs 查看模式）
+
+---
+
+## 运维操作
+
+### 跳过日期（Skip Dates）
+
+通过 `workflow.skip_dates` 字段批量配置需要跳过的业务日期。
+
+**实现方式（方案 C）**：
+1. DS 正常触发生成 instance
+2. Portal 轮询发现新 instance，检查 `biz_date` 是否在 `skip_dates` 中
+3. 如果在跳过列表中，自动调用 DS API kill 该 instance
+4. instance 状态标记为 `skipped`，记录原因
+
+```python
+# workflow_sync_scheduler.py
+async def check_skip_dates(new_instance: WorkflowInstance):
+    workflow = await db.get(Workflow, new_instance.workflow_id)
+    if workflow.skip_dates and new_instance.biz_date.isoformat() in workflow.skip_dates:
+        await ds_client.kill_process_instance(new_instance.ds_instance_id)
+        new_instance.status = 'skipped'
+        new_instance.end_time = datetime.now()
+        await audit_log("instance.auto_skipped", new_instance.id)
+```
+
+- 不单独做「冻结实例」功能
+- 跳过日期由 Portal 层控制，不依赖 DS 原生能力
+
+### 空跑调度（Dry Run）
+
+Workflow 继续定时生成实例，但实例不实际执行计算，立即返回成功。
+
+**两种机制，各司其职**：
+
+| 机制 | 适用场景 | 实现方式 |
+|------|---------|---------|
+| **DS Complement dryRun** | 补数据前验证配置 | 调 DS API 时传 `dryRun=true`，DS 不实际执行，返回验证结果 |
+| **Portal DRY_RUN 注入** | 运行时空跑（定时/手动触发） | DSL 翻译时在脚本开头注入环境变量检查 |
+
+**Portal DRY_RUN 注入方式**：
+```bash
+if [ "$DRY_RUN" = "true" ]; then
+    echo "[DRY RUN] Skipping actual execution"
+    exit 0
+fi
+```
+
+- 所有触发类型（schedule/manual/backfill）生效
+- 生成 instance、标记成功、不执行计算、不阻塞下游
+- 由 Portal 层控制，通过全局参数传递 `DRY_RUN=true`
+
+---
+
+## 监控报警
+
+### 任务状态监控
+
+**触发条件**：
+- **实例运行失败**（P0）— 立即告警
+- **实例运行超时**（P0）— 超过 `workflow.max_running_time` 触发
+- **到点未触发**（P1）— 超过定时时间仍未开始运行
+
+**不做**：基线破线告警（DataWorks 智能基线，Portal 不对标）
+
+### 告警配置
+
+**表结构**：`task_alert_rule`
+- `workflow_id` — 关联 Workflow（null = 全局规则）
+- `alert_type` — `failure` / `timeout` / `not_triggered`
+- `notify_channels` — 渠道数组（email / feishu / dingtalk / wecom）
+- `notify_targets` — 接收人 ID 数组
+- `is_enabled`, `created_at`, `updated_at`
+
+**通知渠道**：复用 `notifier.py` 发送引擎（邮件/飞书/钉钉/企微 Webhook）
+- **接收人**：DQC 和任务告警的接收人可以不同
+
+### 告警收敛策略
+
+- **首次失败**：立即告警
+- **连续失败**：每日发摘要（避免轰炸）
+- **成功恢复**：发送恢复通知
+
+---
 
 ## 状态机
 
-### 组件（4 状态）
+### 组件与工作流（4 状态）
 ```
 draft → tested → online → offline
   ↑                        |
   └────────────────────────┘
 ```
 
-### 工作流（4 状态）
-同组件。`schedule_status` 独立追踪调度状态（ONLINE/OFFLINE）。
+`schedule_status`（仅 Workflow）独立追踪调度状态：`ONLINE` / `OFFLINE`。
+
+---
 
 ## 权限模型
+
+### 基础角色
 
 RBAC 4 角色：admin / developer / analyst / viewer
 - admin 绕过所有权限检查
 - 敏感端点叠加 `require_permission("xxx:yyy")`
 - 资源级 ACL 通过 `SysResourceAccess` 实现
 
-## 发布流程
+### 运维中心权限矩阵
 
+| 功能 | admin | developer | analyst | viewer |
+|------|-------|-----------|---------|--------|
+| **工作流管理** | 全部 | 编辑+发布+上线/下线/冻结 | 只读 | 只读 |
+| **实例管理** | 全部 | 全部操作 | 重跑+终止 | 只读 |
+| **补数据** | 全部 | 创建+终止 | 创建+终止 | ❌ |
+| **监控报警** | 全部 | 配置 | 查看 | 只读 |
+| **操作记录** | 查看全部 | 查看全部 | 查看自己的 | ❌ |
+
+**操作按钮权限**：
+- 重跑 / 终止：developer + analyst
+- 置成功 / 重跑下游：developer + admin（影响范围大，analyst 不可）
+- 强制解锁：admin 专属
+
+### 自定义权限
+
+Admin 通过调整角色权限模板（`sys_role_permission` 表）实现自定义权限，非用户自行调整个人权限。
+- 角色模板变更即时生效
+- 后端 API 做最终校验，前端隐藏按钮仅优化体验
+- `admin` 角色绕过所有权限检查（硬编码）
+
+---
+
+---
+
+## Worker Group（资源组）
+
+**配置方式**：
+- Standalone 模式：仅提供 `default`
+- 集群模式：预定义枚举（`default` / `sync-worker` / `sql-worker`）+ 动态同步 DS Worker Group
+
+**智能默认值**（按组件类型自动分配，用户可覆盖）：
+| 组件类型 | 默认 Worker Group |
+|----------|-------------------|
+| SQL | `sql-worker` |
+| DataX / SeaTunnel | `sync-worker` |
+| Python / Shell | `default` |
+
+**同步策略**：
+- 不实时感知 DS Worker Group 变化
+- 1 小时本地缓存 + 手动刷新按钮
+- 发布时校验：Group 不存在时 DS 报错，Portal 捕获并提示用户
+
+---
+
+## 审计日志
+
+**必须实现**，与业务代码同步开发，后期补成本极高。
+
+**记录范围**：所有运维操作（发布、上线、下线、补数据、重跑、冻结、强制解锁、强制重跑下游等）
+
+**Action 命名规范**：`{resource}.{action}`，如 `instance.rerun`、`workflow.publish`、`instance.set_success`、`workflow.force_unlock`。枚举在后端统一定义，避免前端硬编码。
+
+**表结构**：
+- `audit_log` — user_id, action, target_type, target_id, details(JSON), ip_address, user_agent, created_at
+
+**查询能力**：按用户、时间范围、操作类型、目标对象筛选
+
+**展示位置**：运维中心「操作记录」页面，支持导出
+
+---
+
+## 告警通知
+
+**不做值班表轮班**，每个告警规则独立配置：
+- 发送渠道：邮件 / 飞书 / 钉钉 / 企微 Webhook（可多选）
+- 接收人：由用户自己设置，支持多接收人
+- 不同规则可以配置不同的渠道和接收人
+
+---
+
+## 资源监控
+
+**Portal 不做资源运维**，仅展示：
+- Worker 节点在线/离线状态
+- 各 Worker 上的任务分配情况
+
+**详细集群资源监控**：接入 Prometheus + Grafana（独立部署，不在 Portal 内）
+
+**单机模式**：实时监控本机 CPU/内存/磁盘状态
+
+---
+
+## 前端架构
+
+### 运维中心导航结构
+
+运维中心为**一级导航**（与「开发中心」并列）。
+
+左侧菜单按功能模块划分：
 ```
-Workflow (Portal)
-  └→ dsl_translator.py → DS TaskDefinition JSON
-  └→ publisher.py → ds_client.py (单例) → DS REST API
-  └→ 成功后 online，失败重试，永久失败回滚 tested
+运维中心
+├── 工作流管理 — Workflow 列表、DAG 查看、发布/上线/下线/冻结
+├── 实例管理 — 所有运行实例（Tab 区分触发类型）
+│   ├── 定时实例
+│   ├── 手动实例
+│   ├── 补数据实例
+│   └── 测试实例
+├── 补数据 — 创建补数据任务、查看进度、终止/重跑
+├── 监控报警 — 告警规则配置、告警历史
+└── 操作记录 — 审计日志
 ```
+
+**设计原则**：
+- 实例管理用 Tab 区分 `trigger_type`，操作按钮根据实例状态动态显示
+- 补数据为独立页面（批量任务管理，不适合放在单个 Workflow 详情页）
+
+### 实例管理列表
+
+**列表字段**：复选框、工作流名称、业务日期、触发类型（tag）、状态、开始时间、运行时长、操作、更多（▼展开）
+- 补数据链条信息（`backfill_chain_id`、`complement_id`、链条进度）折叠在「更多」展开行中，主列表不常驻
+
+**状态操作映射**：
+| 状态 | 操作按钮 |
+|------|----------|
+| `submit` / `waiting` | 取消等待 |
+| `running` | 终止运行 |
+| `success` | 查看日志、重跑、重跑下游 |
+| `fail` | 查看日志、重跑、重跑下游、置成功 |
+| `timeout` | 查看日志、重跑、重跑下游、置成功 |
+
+**「重跑下游」语义**：仅对该 Workflow 内的 DAG 下游节点生效（DS START_CURRENT_TASK_EXECUTE），非跨 Workflow 的「强制重跑下游」。跨 Workflow 重跑通过血缘系统实现，限制最近 7 天 + 最多 20 个下游 Workflow。
+| `kill` | 查看日志、重跑 |
+| `pause` | 恢复运行、终止运行 |
+
+**批量操作**：支持批量重跑、批量置成功、批量终止
+- 限制：仅允许同一 Workflow 且状态兼容的实例批量操作，避免误操作
+
+### 日志查看器
+
+**实时刷新**：running 状态每 3 秒轮询增量日志，终态停止自动刷新
+
+**展示限制**：
+- running 状态：无限制 append，20000 行软上限（超过后提示「日志过长，建议下载查看」）
+- 终态：首次加载最多 5000 行 + 虚拟滚动
+- 支持 `.log` 文件下载
+
+**搜索与高亮**：
+- 前端本地搜索框 + 上一个/下一个导航
+- 自动错误高亮：包含 `ERROR` / `Exception` / `Traceback` 的行红底显示
+
+**扩展性**：设计为通用日志组件，预留接口支持后续对接其他组件（如 Airflow、自定义脚本）的日志统一管理
+
+### DAG 图交互
+
+**展示位置**：实例详情页内嵌（上方信息 + 下方 DAG + 底部任务列表）。
+
+**节点状态颜色**：
+| 状态 | 颜色 |
+|------|------|
+| success | 绿色 |
+| fail | 红色 |
+| running | 蓝色 |
+| waiting / submit | 灰色 |
+
+**右键菜单**（根据节点状态动态显示）：
+| 节点状态 | 菜单项 |
+|----------|--------|
+| success | 查看日志、重跑该节点 |
+| fail | 查看日志、重跑该节点、置成功、重跑该节点及下游 |
+| running | 查看日志、终止该节点 |
+| waiting / submit | —（只读） |
+
+**上下游查看**：DAG 高亮模式切换（全部 / 上游路径 / 下游路径 / 仅当前），不做独立展开面板。
+
+### 工作流列表筛选
+
+运维中心首页基础能力。工作流 > 20 个后无筛选无法使用。
+
+**筛选条件**：
+- 工作流名称（模糊搜索）
+- 责任人（下拉选择）
+- 状态（online / offline / draft / tested）
+- 最近运行状态（最近 24h 成功 / 失败 / 未运行 / 无记录）
+- 调度周期（天 / 小时 / 分钟 / 周 — 解析 DS Cron 表达式）
+- 标签（用户自定义标签，支持多选）
+
+**默认排序**：按最近修改时间倒序
+**支持自定义排序和筛选条件保存**
+
+### 运维概览
+
+非华丽大屏，简洁数据卡片。进入页面刷新 + 每 60 秒自动刷新 + 手动刷新按钮。
+
+**核心卡片**（4 张）：
+- 昨日实例成功率（统计口径：定时实例，排除测试/手动/补数据）
+- 正在运行的实例数（全部 trigger_type 实时计数）
+- 待处理告警数（未恢复的失败/超时告警）
+- 今日失败数（00:00 至今，全部 trigger_type）
+
+**扩展卡片**：
+- 即将超时预警（运行时长接近 `max_running_time`）— 最有价值的预警卡片
+- 进行中补数据任务数
+- 失败 Workflow Top5（最近 7 天）
+
+**交互**：全部卡片支持点击跳转，每个都是运维入口
+- 昨日成功率 → 实例管理（昨天全部实例）
+- 失败 Top5 → 对应 Workflow 实例列表
+- 待处理告警 → 监控报警页面
+
+### 暂不做（Phase 2）
+
+- **数据质量监控页**：DQC 是独立模块，当前 Portal 尚未深度集成。等 DQC 规则数量 > 10 条后再做独立页面
+
+---
 
 ## 关键约束
 
 1. **Portal 是 DS 的唯一控制面** — 所有调度操作必须经过 Portal
 2. **DataX 不走 DS 原生 DataX 节点** — 翻译为 SHELL + heredoc，避免版本耦合
 3. **组件状态与 DS 状态弱一致** — 通过 outbox 异步同步，允许短暂不一致
-4. **DQC 在 SHELL 节点中调用 Portal API** — 需要 `DQC_SERVICE_TOKEN`
+4. **DQC 在 SHELL 节点中调用 Portal API** — 需要 `DQC_SERVICE_TOKEN` 环境变量
+5. **组件和工作流有独立版本控制** — 组件修改不会自动同步到引用它的工作流，需用户确认更新
+6. **Portal 与 DS 只通过 REST API 交互** — 不直接读写 DS 数据库，解耦优先
+7. **跨 Workflow 依赖在 Portal 层维护** — DS 不感知 ProcessDefinition 之间的依赖关系
