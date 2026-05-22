@@ -5,6 +5,7 @@ import os
 import re
 import ast
 import shlex
+import resource
 from typing import Optional, Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -16,6 +17,28 @@ from app.core.security import get_current_user
 from app.core.permissions import require_permission, check_resource_permission
 from app.models.component import Component, ComponentHistory
 from app.models.user import SysUser
+
+def _set_resource_limits():
+    """子进程资源限制：CPU 60s、输出文件 1MB、进程数 32、内存 512MB（Linux）"""
+    try:
+        resource.setrlimit(resource.RLIMIT_CPU, (60, 60))
+    except (OSError, ValueError):
+        pass
+    try:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (1024 * 1024, 1024 * 1024))
+    except (OSError, ValueError):
+        pass
+    try:
+        resource.setrlimit(resource.RLIMIT_NPROC, (32, 32))
+    except (OSError, ValueError):
+        pass
+    try:
+        mem_limit = getattr(resource, "RLIMIT_AS", None)
+        if mem_limit is not None:
+            resource.setrlimit(mem_limit, (512 * 1024 * 1024, 512 * 1024 * 1024))
+    except (OSError, ValueError):
+        pass
+
 
 router = APIRouter(prefix="/components", tags=["组件"])
 
@@ -122,6 +145,15 @@ def _get_or_404(db: Session, comp_id: int) -> Component:
     return c
 
 
+def _validate_datax_config(cfg: dict, comp_type: str) -> None:
+    """校验 DataX 组件必填字段"""
+    if comp_type != "datax":
+        return
+    missing = [k for k in ("source_id", "target_id", "source_table", "target_table") if not cfg.get(k)]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"datax 组件缺少必填字段: {', '.join(missing)}")
+
+
 def _save_history(db: Session, c: Component, comment: str = None):
     """保存组件当前状态到历史快照表"""
     hist = ComponentHistory(
@@ -133,6 +165,8 @@ def _save_history(db: Session, c: Component, comment: str = None):
         config_json=c.config_json or {},
         params=c.params or [],
         status=c.status,
+        folder_id=c.folder_id,
+        dqc_rule_ids=c.dqc_rule_ids,
         created_by=c.created_by,
         comment=comment,
     )
@@ -284,14 +318,7 @@ def create_component(
         cfg[key] = req.code
     if req.datasource_id is not None:
         cfg['datasource_id'] = req.datasource_id
-    # datax 类型必填字段校验
-    if req.type == "datax":
-        missing = []
-        for key in ("source_id", "target_id", "source_table", "target_table"):
-            if not cfg.get(key):
-                missing.append(key)
-        if missing:
-            raise HTTPException(status_code=400, detail=f"datax 组件缺少必填字段: {', '.join(missing)}")
+    _validate_datax_config(cfg, req.type)
     c = Component(
         name=req.name,
         type=req.type,
@@ -504,15 +531,8 @@ def update_component(
         if ds_id is not None:
             cfg['datasource_id'] = ds_id
         updates['config_json'] = cfg
-    # datax 类型更新时校验必填字段
     if c.type == "datax" and 'config_json' in updates:
-        new_cfg = updates['config_json'] or {}
-        missing = []
-        for k in ("source_id", "target_id", "source_table", "target_table"):
-            if not new_cfg.get(k):
-                missing.append(k)
-        if missing:
-            raise HTTPException(status_code=400, detail=f"datax 组件缺少必填字段: {', '.join(missing)}")
+        _validate_datax_config(updates['config_json'], c.type)
     # 保存历史快照（仅在配置有实质变更时）
     if any(k in updates for k in ("config_json", "params", "name", "description")):
         _save_history(db, c, comment="编辑保存")
@@ -698,7 +718,10 @@ def run_component(
     cfg = c.config_json or {}
 
     # 参数替换
-    ctx = build_param_context(c.params or [], req.runtime_params)
+    try:
+        ctx = build_param_context(c.params or [], req.runtime_params)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     cfg = substitute_config(cfg, ctx, c.type)
 
     code = (cfg.get("sql") or cfg.get("script") or cfg.get("code") or "").strip()
@@ -804,7 +827,8 @@ def run_component(
                 tmp = f.name
             try:
                 result = subprocess.run(
-                    ["python3", tmp], capture_output=True, text=True, timeout=120
+                    ["python3", tmp], capture_output=True, text=True, timeout=120,
+                    preexec_fn=_set_resource_limits
                 )
             finally:
                 os.unlink(tmp)
@@ -817,7 +841,8 @@ def run_component(
             if not args:
                 raise HTTPException(400, "Shell 组件代码为空")
             result = subprocess.run(
-                args, capture_output=True, text=True, timeout=120
+                args, capture_output=True, text=True, timeout=120,
+                preexec_fn=_set_resource_limits
             )
         duration_ms = int((time.time() - start) * 1000)
         log = (result.stdout + result.stderr).strip() or "(无输出)"
@@ -849,7 +874,10 @@ def test_component(
 
     # 参数替换：对 test 也做一次替换，让用户看到效果
     cfg = c.config_json or {}
-    ctx = build_param_context(c.params or [], req.runtime_params)
+    try:
+        ctx = build_param_context(c.params or [], req.runtime_params)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     cfg = substitute_config(cfg, ctx, c.type)
 
     # === 实际验证 ===
@@ -916,6 +944,7 @@ def publish_component(
             detail=f"只有 tested 状态可发布,当前状态 {c.status},请先测试",
         )
     c.status = STATUS_ONLINE
+    _save_history(db, c, comment="发布上线")
     db.commit()
     db.refresh(c)
     return {"message": "已发布", **_serialize(c)}
@@ -934,6 +963,7 @@ def quick_publish_component(
     if c.status == STATUS_OFFLINE:
         raise HTTPException(400, "已下线组件请先将状态改回 draft 再发布")
     c.status = STATUS_ONLINE
+    _save_history(db, c, comment="一键发布上线")
     db.commit()
     db.refresh(c)
     return {"message": "已发布", **_serialize(c)}

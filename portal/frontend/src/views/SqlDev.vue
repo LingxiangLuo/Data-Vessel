@@ -468,7 +468,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, nextTick } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import LangIcon from '../components/LangIcon.vue'
 import { Message } from '@arco-design/web-vue'
 import {
@@ -1592,6 +1592,13 @@ function extractTableName(sql: string): string {
 }
 
 onMounted(() => Promise.all([loadFolders(), loadComponents(), loadDatasources(), loadProjects()]))
+
+onBeforeUnmount(() => {
+  if (lockHeartbeatTimer.value) {
+    clearInterval(lockHeartbeatTimer.value)
+    lockHeartbeatTimer.value = null
+  }
+})
 </script>
 
 <style scoped>

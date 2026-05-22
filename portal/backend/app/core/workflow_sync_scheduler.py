@@ -9,6 +9,7 @@ from typing import Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
@@ -175,73 +176,82 @@ async def _consume_queue() -> None:
     """消费 outbox 队列"""
     db = SessionLocal()
     try:
-        # 恢复超时的 processing 记录（进程崩溃后遗留）
-        stale_cutoff = datetime.now() - timedelta(minutes=5)
-        db.query(WorkflowSyncQueue).filter(
-            WorkflowSyncQueue.status == "processing",
-            WorkflowSyncQueue.updated_at < stale_cutoff,
-        ).update({"status": "pending"}, synchronize_session=False)
-        db.commit()
+        # 分布式锁：多进程部署时防止重复消费（MySQL GET_LOCK）
+        lock_result = db.execute(text("SELECT GET_LOCK('workflow_sync_consumer', 0)")).scalar()
+        if lock_result != 1:
+            logger.debug("Another process is consuming the queue, skipping")
+            return
 
-        # 获取待处理记录（按 updated_at 排序，避免高退避记录占满批次）
-        records = (
-            db.query(WorkflowSyncQueue)
-            .filter(
-                WorkflowSyncQueue.status.in_(["pending", "failed"]),
-                WorkflowSyncQueue.retry_count < WorkflowSyncQueue.max_retries,
-            )
-            .order_by(WorkflowSyncQueue.updated_at)
-            .limit(10)
-            .all()
-        )
-
-        for record in records:
-            # 指数退避：2^retry_count 分钟
-            backoff_minutes = 2 ** record.retry_count
-            if record.updated_at and (datetime.now() - record.updated_at) < timedelta(minutes=backoff_minutes):
-                continue
-
-            record.status = "processing"
+        try:
+            # 恢复超时的 processing 记录（进程崩溃后遗留）
+            stale_cutoff = datetime.now() - timedelta(minutes=5)
+            db.query(WorkflowSyncQueue).filter(
+                WorkflowSyncQueue.status == "processing",
+                WorkflowSyncQueue.updated_at < stale_cutoff,
+            ).update({"status": "pending"}, synchronize_session=False)
             db.commit()
 
-            handler = _ACTION_HANDLERS.get(record.action)
-            if not handler:
-                record.status = "failed"
-                record.retry_count = record.max_retries  # 防止无限循环
-                record.error_message = f"Unknown action: {record.action}"
-                db.commit()
-                continue
+            # 获取待处理记录（按 updated_at 排序，避免高退避记录占满批次）
+            records = (
+                db.query(WorkflowSyncQueue)
+                .filter(
+                    WorkflowSyncQueue.status.in_(["pending", "failed"]),
+                    WorkflowSyncQueue.retry_count < WorkflowSyncQueue.max_retries,
+                )
+                .order_by(WorkflowSyncQueue.updated_at)
+                .limit(10)
+                .all()
+            )
 
-            try:
-                await handler(db, record)
-                record.status = "success"
-                record.completed_at = datetime.now()
-                record.error_message = None
+            for record in records:
+                # 指数退避：首次立即执行，第一次失败后也立即重试，之后 2/4/8... 分钟
+                backoff_minutes = 0 if record.retry_count <= 1 else 2 ** (record.retry_count - 1)
+                if record.updated_at and (datetime.now() - record.updated_at) < timedelta(minutes=backoff_minutes):
+                    continue
+
+                record.status = "processing"
                 db.commit()
-                logger.info("Workflow sync %s %s succeeded", record.action, record.workflow_id)
-            except Exception as e:
-                db.rollback()
-                record.retry_count += 1
-                exhausted = record.retry_count >= record.max_retries
-                record.status = "failed" if exhausted else "pending"
-                record.error_message = str(e)[:500]
-                # publish 乐观更新了 online，失败时回写 tested
-                if exhausted and record.action == "publish":
-                    wf = db.query(Workflow).filter(Workflow.id == record.workflow_id).first()
-                    if wf and wf.status == "online":
-                        wf.status = "tested"
-                        wf.schedule_status = "OFFLINE"
-                db.commit()
-                if exhausted:
-                    logger.error(
-                        "Workflow sync %s %s FAILED PERMANENTLY after %d retries: %s",
-                        record.action, record.workflow_id, record.max_retries, e
-                    )
-                else:
-                    logger.warning(
-                        "Workflow sync %s %s failed (retry %d/%d): %s",
-                        record.action, record.workflow_id, record.retry_count, record.max_retries, e
-                    )
+
+                handler = _ACTION_HANDLERS.get(record.action)
+                if not handler:
+                    record.status = "failed"
+                    record.retry_count = record.max_retries  # 防止无限循环
+                    record.error_message = f"Unknown action: {record.action}"
+                    db.commit()
+                    continue
+
+                try:
+                    await handler(db, record)
+                    record.status = "success"
+                    record.completed_at = datetime.now()
+                    record.error_message = None
+                    db.commit()
+                    logger.info("Workflow sync %s %s succeeded", record.action, record.workflow_id)
+                except Exception as e:
+                    db.rollback()
+                    record.retry_count += 1
+                    exhausted = record.retry_count >= record.max_retries
+                    record.status = "failed" if exhausted else "pending"
+                    record.error_message = str(e)[:500]
+                    # publish 乐观更新了 online，失败时回写 tested
+                    if exhausted and record.action == "publish":
+                        wf = db.query(Workflow).filter(Workflow.id == record.workflow_id).first()
+                        if wf and wf.status == "online":
+                            wf.status = "tested"
+                            wf.schedule_status = "OFFLINE"
+                    db.commit()
+                    if exhausted:
+                        logger.error(
+                            "Workflow sync %s %s FAILED PERMANENTLY after %d retries: %s",
+                            record.action, record.workflow_id, record.max_retries, e
+                        )
+                    else:
+                        logger.warning(
+                            "Workflow sync %s %s failed (retry %d/%d): %s",
+                            record.action, record.workflow_id, record.retry_count, record.max_retries, e
+                        )
+        finally:
+            db.execute(text("SELECT RELEASE_LOCK('workflow_sync_consumer')"))
     except Exception:
         db.rollback()
         logger.exception("Workflow sync queue consumer error")

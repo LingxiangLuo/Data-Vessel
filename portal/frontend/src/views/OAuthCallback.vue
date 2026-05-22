@@ -14,16 +14,14 @@ const router = useRouter()
 const userStore = useUserStore()
 
 onMounted(async () => {
-  // token 在 hash fragment 中（#token=xxx），不会出现在服务器日志
-  const hash = window.location.hash.slice(1)  // 去掉 '#'
+  const hash = window.location.hash.slice(1)
   const params = new URLSearchParams(hash)
-  const token = params.get('token')
+  const status = params.get('status')
 
-  // 立即清除 hash，避免 token 留在浏览器历史
   window.history.replaceState(null, '', window.location.pathname)
 
-  if (!token) {
-    Message.error('OAuth 登录失败：未获取到 token')
+  if (status !== 'ok') {
+    Message.error('OAuth 登录失败')
     router.push('/login')
     return
   }

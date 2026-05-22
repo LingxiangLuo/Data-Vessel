@@ -1,3 +1,4 @@
+import logging
 import os
 import uuid
 from typing import Optional, List, Dict, Any
@@ -85,15 +86,30 @@ class WorkflowUpdate(BaseModel):
     priority: Optional[int] = Field(default=None, ge=1, le=3)
 
 
-def _serialize(w: Workflow, db: Session) -> dict:
-    """序列化 workflow,steps 中带上 component 详情"""
+def _serialize(w: Workflow, db: Optional[Session] = None, comp_map: dict = None) -> dict:
+    """序列化 workflow,steps 中带上 component 详情
+
+    comp_map 为外部批量查询的组件缓存；未提供且需要组件详情时内部查询。
+    """
     steps = w.steps_json or []
-    # 补充 component 详情
-    comp_ids = [s.get("component_id") for s in steps if s.get("component_id")]
-    comp_map = {}
-    if comp_ids:
-        comps = db.query(Component).filter(Component.id.in_(comp_ids)).all()
+    dag = w.dag_json
+
+    # 收集所有需要的 component_id（steps + dag 合并）
+    all_comp_ids = set()
+    for s in steps:
+        if s.get("component_id"):
+            all_comp_ids.add(s["component_id"])
+    if dag and dag.get("nodes"):
+        for n in dag["nodes"]:
+            if n.get("component_id"):
+                all_comp_ids.add(n["component_id"])
+
+    # 优先使用外部缓存，否则内部一次查询
+    if comp_map is None and db is not None and all_comp_ids:
+        comps = db.query(Component).filter(Component.id.in_(list(all_comp_ids))).all()
         comp_map = {c.id: c for c in comps}
+    comp_map = comp_map or {}
+
     enriched_steps = []
     for idx, s in enumerate(steps):
         cid = s.get("component_id")
@@ -106,6 +122,7 @@ def _serialize(w: Workflow, db: Session) -> dict:
             "component_type": c.type if c else None,
             "component_status": c.status if c else None,
         })
+
     # 计算下次执行时间
     next_fire_time = None
     if w.cron_expression:
@@ -113,29 +130,23 @@ def _serialize(w: Workflow, db: Session) -> dict:
             from croniter import croniter
             from datetime import datetime
             cron_expr = w.cron_expression.strip()
-            # DS 用 6 段 CRON（含秒），croniter 只支持 5 段，去掉第一段秒
             parts = cron_expr.split()
             if len(parts) == 6:
                 cron_expr = ' '.join(parts[1:])
-            # 替换 ? 为 * (DS 用 ? 表示不指定)
             cron_expr = cron_expr.replace('?', '*')
             cron = croniter(cron_expr, datetime.now())
             next_fire_time = str(cron.get_next(datetime))
         except Exception as e:
             logging.getLogger(__name__).warning("cron parse error for workflow %s: %s", w.id, e)
-    # 把 component type 补进 dag 节点，前端渲染节点颜色/样式依赖此字段
-    dag = w.dag_json
+
+    # DAG 节点补充 type
     if dag and dag.get("nodes"):
-        dag_comp_ids = [n.get("component_id") for n in dag["nodes"] if n.get("component_id")]
-        if dag_comp_ids:
-            dag_comps = {c.id: c for c in db.query(Component).filter(Component.id.in_(dag_comp_ids)).all()}
-        else:
-            dag_comps = {}
         enriched_nodes = [
-            {**n, "type": dag_comps[n["component_id"]].type if n.get("component_id") in dag_comps else n.get("type", "sql")}
+            {**n, "type": comp_map[n["component_id"]].type if n.get("component_id") in comp_map else n.get("type", "sql")}
             for n in dag["nodes"]
         ]
         dag = {**dag, "nodes": enriched_nodes}
+
     return {
         "id": w.id,
         "name": w.name,
@@ -210,31 +221,9 @@ def _enqueue_sync(db: Session, workflow_id: int, action: str) -> WorkflowSyncQue
 
 
 # ===== 运行信息同步 =====
-@router.post("/sync-last-run")
-async def sync_last_run(
-    db: Session = Depends(get_db),
-    current_user: SysUser = Depends(get_current_user),
-):
-    """批量从 DS 同步最近运行信息到 Portal 缓存字段"""
-    from datetime import datetime
-    workflows = db.query(Workflow).filter(
-        Workflow.ds_process_code.isnot(None)
-    ).all()
-    if not workflows:
-        return {"synced": 0}
-    try:
-        ds = get_ds_client()
-        pc = await ds._discover_project()
-        if not pc:
-            return {"synced": 0, "error": "DS project unavailable"}
-    except Exception as e:
-        logging.getLogger(__name__).warning("DS unavailable: %s", e)
-        return {"synced": 0, "error": "DS unavailable"}
-
-    import asyncio
-
-    # 1. 异步拉取 DS 数据（分批并发，避免串行瓶颈）
-    async def _fetch_instance(w: Workflow):
+async def _fetch_ds_instances(ds, pc: int, workflows: List[Workflow]):
+    """分批并发从 DS 拉取每个 workflow 的最近实例"""
+    async def _fetch_one(w: Workflow):
         try:
             inst = await ds.get(f"/projects/{pc}/process-instances", params={
                 "pageNo": 1, "pageSize": 1,
@@ -250,72 +239,95 @@ async def sync_last_run(
     ds_results = []
     for i in range(0, len(workflows), BATCH_SIZE):
         batch = workflows[i : i + BATCH_SIZE]
-        results = await asyncio.gather(*[_fetch_instance(w) for w in batch])
+        results = await asyncio.gather(*[_fetch_one(w) for w in batch])
         ds_results.extend(results)
+    return ds_results
 
-    # 2. 同步 DB 更新放到线程池执行，避免阻塞事件循环
-    def _update_workflows():
-        synced = 0
-        for wf_id, last in ds_results:
-            if not last:
-                continue
-            w = db.query(Workflow).filter(Workflow.id == wf_id).first()
-            if not w:
-                continue
-            w.last_run_status = last.get("state")
-            start_str = last.get("startTime")
-            end_str = last.get("endTime")
-            if start_str:
-                try:
-                    w.last_run_time = datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S")
-                except Exception:
-                    w.last_run_time = None
-            if start_str and end_str:
-                try:
-                    fmt = "%Y-%m-%d %H:%M:%S"
-                    w.last_run_duration = int(
-                        (datetime.strptime(end_str, fmt) - datetime.strptime(start_str, fmt)).total_seconds()
-                    )
-                except Exception:
-                    pass
-            synced += 1
-        db.commit()
-        return synced
 
-    synced = await asyncio.to_thread(_update_workflows)
+def _update_workflow_runs(db: Session, ds_results: List[tuple]):
+    """根据 DS 返回数据更新 workflow 最近运行信息"""
+    from datetime import datetime
+    synced = 0
+    for wf_id, last in ds_results:
+        if not last:
+            continue
+        w = db.query(Workflow).filter(Workflow.id == wf_id).first()
+        if not w:
+            continue
+        w.last_run_status = last.get("state")
+        start_str = last.get("startTime")
+        end_str = last.get("endTime")
+        if start_str:
+            try:
+                w.last_run_time = datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                w.last_run_time = None
+        if start_str and end_str:
+            try:
+                fmt = "%Y-%m-%d %H:%M:%S"
+                w.last_run_duration = int(
+                    (datetime.strptime(end_str, fmt) - datetime.strptime(start_str, fmt)).total_seconds()
+                )
+            except Exception:
+                pass
+        synced += 1
+    db.commit()
+    return synced
 
-    # 3. 告警规则检查（同步 DB 查询也放到线程池）
-    async def _check_alerts():
-        from app.models.alert_rule import AlertRule
-        from app.core.notifier import notify as do_notify
-        rules = db.query(AlertRule).filter(AlertRule.enabled == True).all()
-        alerted = 0
-        for w in workflows:
-            if not w.last_run_status:
+
+async def _check_alert_rules(db: Session, workflows: List[Workflow]):
+    """检查 workflow 运行结果是否触发告警规则"""
+    from app.models.alert_rule import AlertRule
+    from app.core.notifier import notify as do_notify
+    rules = db.query(AlertRule).filter(AlertRule.enabled == True).all()
+    alerted = 0
+    for w in workflows:
+        if not w.last_run_status:
+            continue
+        for rule in rules:
+            if rule.target_type == "workflow" and rule.target_id != w.id:
                 continue
-            for rule in rules:
-                if rule.target_type == "workflow" and rule.target_id != w.id:
-                    continue
-                triggered = False
-                if rule.trigger_type == "failure" and w.last_run_status == "FAILURE":
+            triggered = False
+            if rule.trigger_type == "failure" and w.last_run_status == "FAILURE":
+                triggered = True
+            elif rule.trigger_type == "timeout" and rule.trigger_value:
+                if w.last_run_duration and w.last_run_duration > rule.trigger_value:
                     triggered = True
-                elif rule.trigger_type == "timeout" and rule.trigger_value:
-                    if w.last_run_duration and w.last_run_duration > rule.trigger_value:
-                        triggered = True
-                if triggered:
-                    event = {
-                        "workflow_name": w.name,
-                        "status": w.last_run_status,
-                        "time": str(w.last_run_time) if w.last_run_time else "",
-                        "duration": w.last_run_duration,
-                    }
-                    await do_notify(rule, event)
-                    alerted += 1
-        return alerted
+            if triggered:
+                event = {
+                    "workflow_name": w.name,
+                    "status": w.last_run_status,
+                    "time": str(w.last_run_time) if w.last_run_time else "",
+                    "duration": w.last_run_duration,
+                }
+                await do_notify(rule, event)
+                alerted += 1
+    return alerted
 
+
+@router.post("/sync-last-run")
+async def sync_last_run(
+    db: Session = Depends(get_db),
+    current_user: SysUser = Depends(get_current_user),
+):
+    """批量从 DS 同步最近运行信息到 Portal 缓存字段"""
+    workflows = db.query(Workflow).filter(Workflow.ds_process_code.isnot(None)).all()
+    if not workflows:
+        return {"synced": 0}
+    try:
+        ds = get_ds_client()
+        pc = await ds._discover_project()
+        if not pc:
+            return {"synced": 0, "error": "DS project unavailable"}
+    except Exception as e:
+        logging.getLogger(__name__).warning("DS unavailable: %s", e)
+        return {"synced": 0, "error": "DS unavailable"}
+
+    ds_results = await _fetch_ds_instances(ds, pc, workflows)
+    synced = await asyncio.to_thread(_update_workflow_runs, db, ds_results)
     alerted = 0
     try:
-        alerted = await _check_alerts()
+        alerted = await _check_alert_rules(db, workflows)
     except Exception as e:
         logging.getLogger(__name__).warning("alert check failed: %s", e)
 
@@ -339,10 +351,8 @@ def list_workflows(
     if status:
         q = q.filter(Workflow.status == status)
     if tag:
-        # 先用 contains 粗筛，再在应用层精确匹配，避免 "日报" 误匹配 "日报表"
+        # JSON contains 粗筛 + 应用层精确匹配，避免 "日报" 误匹配 "日报表"
         q = q.filter(Workflow.tags.contains(f'"{tag}"'))
-    if tag:
-        # 应用层精确过滤（JSON contains 可能误匹配子串）
         candidate_ids = [w.id for w in q.with_entities(Workflow.id, Workflow.tags).all() if tag in (w.tags or [])]
         q = db.query(Workflow).filter(Workflow.id.in_(candidate_ids)) if candidate_ids else q.filter(False)
 
@@ -353,12 +363,29 @@ def list_workflows(
 
     total = q.count()
     items = q.order_by(Workflow.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
+
+    # 批量预查所有 component，避免每个 workflow 单独查询（P3-4/5）
+    all_comp_ids = set()
+    for w in items:
+        for s in (w.steps_json or []):
+            if s.get("component_id"):
+                all_comp_ids.add(s["component_id"])
+        dag = w.dag_json
+        if dag and dag.get("nodes"):
+            for n in dag["nodes"]:
+                if n.get("component_id"):
+                    all_comp_ids.add(n["component_id"])
+    comp_map = {}
+    if all_comp_ids:
+        comps = db.query(Component).filter(Component.id.in_(list(all_comp_ids))).all()
+        comp_map = {c.id: c for c in comps}
+
     # 收集所有已使用的标签
     all_tags = set()
     for w in db.query(Workflow.tags).filter(Workflow.tags.isnot(None)).all():
         if w.tags:
             all_tags.update(w.tags)
-    return {"total": total, "items": [_serialize(w, db) for w in items], "all_tags": sorted(all_tags)}
+    return {"total": total, "items": [_serialize(w, comp_map=comp_map) for w in items], "all_tags": sorted(all_tags)}
 
 
 @router.post("")
@@ -725,20 +752,26 @@ async def get_instance_detail(
         name = task.get("name", "")
         if not name.startswith("DQC:"):
             continue
-        # 提取规则名（去掉 DQC: 前缀和 [强]/[弱] 后缀）
-        rule_name = name[4:].replace("[强]", "").replace("[弱]", "").strip()
-        if rule_name.endswith("..."):
-            rule_name = rule_name[:-3]
-
-        # 查找规则：先精确匹配，再模糊匹配
-        rule = db.query(DqcRule).filter(DqcRule.name == rule_name).first()
+        # 优先从名称中提取 rule_id（新格式 DQC:{rule_id}:{rule_name}[强/弱]）
+        rule = None
+        body = name[4:]
+        if ":" in body:
+            maybe_id, _ = body.split(":", 1)
+            if maybe_id.isdigit():
+                rule = db.query(DqcRule).filter(DqcRule.id == int(maybe_id)).first()
+        # 回退：旧格式按规则名匹配
         if not rule:
-            rule = (
-                db.query(DqcRule)
-                .filter(DqcRule.name.contains(rule_name))
-                .order_by(DqcRule.id.desc())
-                .first()
-            )
+            rule_name = body.replace("[强]", "").replace("[弱]", "").strip()
+            if rule_name.endswith("..."):
+                rule_name = rule_name[:-3]
+            rule = db.query(DqcRule).filter(DqcRule.name == rule_name).first()
+            if not rule:
+                rule = (
+                    db.query(DqcRule)
+                    .filter(DqcRule.name.contains(rule_name))
+                    .order_by(DqcRule.id.desc())
+                    .first()
+                )
         if not rule:
             logging.getLogger(__name__).warning("DQC task %s matched no rule", name)
             continue

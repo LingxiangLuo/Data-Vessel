@@ -471,9 +471,13 @@ function onDragEnd() {
 
 // ---- 状态可视化 ----
 function statusTransitionPath(status: string): { label: string; color: string; current: boolean }[] {
-  const defs = STATUS_DEFS[status as ComponentStatus]
-  if (!defs) return []
-  return [{ label: defs.label, color: defs.color, current: true }]
+  const path = [
+    { key: 'draft',   label: '草稿',   color: '#86909C' },
+    { key: 'tested',  label: '已测试', color: '#0FC6C2' },
+    { key: 'online',  label: '已上线', color: '#00B42A' },
+    { key: 'offline', label: '已下线', color: '#FF7D00' },
+  ]
+  return path.map(p => ({ label: p.label, color: p.color, current: p.key === status }))
 }
 
 onMounted(() => loadData())

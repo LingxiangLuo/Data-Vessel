@@ -17,6 +17,8 @@ class ComponentHistory(Base):
     config_json = Column(JSON, nullable=False, default=dict)
     params = Column(JSON, default=list)
     status = Column(String(50), nullable=False)
+    folder_id = Column(BigInteger, comment="所属文件夹 id")
+    dqc_rule_ids = Column(JSON, nullable=True, comment="关联的数据质量规则 ID 列表")
     created_by = Column(BigInteger)
     created_at = Column(DateTime, server_default=func.now())
     comment = Column(String(255), comment="版本备注")

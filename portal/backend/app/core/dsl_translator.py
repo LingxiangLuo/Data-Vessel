@@ -339,10 +339,13 @@ def translate_dqc_task(
     """
     is_strong = getattr(rule, "is_strong", False)
     suffix = "[强]" if is_strong else "[弱]"
-    name = f"DQC:{rule.name}{suffix}"
-    # 截断到 DS 允许的 100 字符以内
+    # 名称中嵌入 rule_id 以便实例反查，格式 DQC:{rule_id}:{rule_name}[强/弱]
+    name = f"DQC:{rule.id}:{rule.name}{suffix}"
+    # 截断到 DS 允许的 100 字符以内，优先保留 rule_id 部分
     if len(name) > 100:
-        name = name[:97] + "..."
+        prefix = f"DQC:{rule.id}:"
+        max_name = 97 - len(prefix)
+        name = prefix + rule.name[:max_name] + "..."
 
     check_url = f"{portal_base_url}/api/dqc-rules/{rule.id}/check"
     exit_cmd = "exit 1" if is_strong else 'echo "[DQC] Weak rule, continuing..."'

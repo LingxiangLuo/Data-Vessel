@@ -160,7 +160,8 @@ def build_datax_job(
         if "--" in w or "/*" in w:
             raise ValueError("WHERE 条件中不允许包含注释")
         w_upper = w.upper()
-        for kw in ("INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER", "UNION", "EXEC", "EXECUTE"):
+        # 优先检查多词关键字（UNION ALL 在 UNION 之前），避免被短模式抢先匹配
+        for kw in ("INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER", "UNION ALL", "UNION", "EXEC", "EXECUTE"):
             if re.search(rf"\b{kw}\b", w_upper):
                 raise ValueError(f"WHERE 条件中不允许包含关键字: {kw}")
     if not final_where and sync_type == "increment":

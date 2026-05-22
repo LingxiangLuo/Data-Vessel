@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status, Cookie
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 import hashlib
@@ -21,8 +22,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["认证"])
 
-# CSRF token 缓存（内存 + Redis 回退）
-_csrf_tokens: dict[str, float] = {}
 
 
 def _generate_csrf_token() -> str:
@@ -86,21 +85,28 @@ def _check_login_rate(ip: str, username: str = "") -> None:
     now = time.time()
     window = settings.LOGIN_LOCKOUT_SECONDS
 
-    # IP 级检查
+    # IP 级检查（内存路径：过滤后写回，防止无限增长）
     def _check(key: str, store: dict) -> None:
         if r:
             raw = r.get(key)
             attempts = json.loads(raw) if raw else []
+            attempts = [t for t in attempts if now - t < window]
+            if len(attempts) >= settings.LOGIN_MAX_ATTEMPTS:
+                retry_after = int(window - (now - attempts[0]))
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=f"登录尝试过于频繁，请 {retry_after} 秒后再试",
+                )
         else:
             with _login_lock:
-                attempts = store.get(key, [])
-        attempts = [t for t in attempts if now - t < window]
-        if len(attempts) >= settings.LOGIN_MAX_ATTEMPTS:
-            retry_after = int(window - (now - attempts[0]))
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=f"登录尝试过于频繁，请 {retry_after} 秒后再试",
-            )
+                attempts = [t for t in store.get(key, []) if now - t < window]
+                store[key] = attempts
+                if len(attempts) >= settings.LOGIN_MAX_ATTEMPTS:
+                    retry_after = int(window - (now - attempts[0]))
+                    raise HTTPException(
+                        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                        detail=f"登录尝试过于频繁，请 {retry_after} 秒后再试",
+                    )
 
     _check(f"login_attempts:{ip}", _login_attempts)
     if username:
@@ -116,11 +122,14 @@ def _record_failed_login(ip: str, username: str = "") -> None:
         if r:
             raw = r.get(key)
             attempts = json.loads(raw) if raw else []
+            attempts = [t for t in attempts if now - t < window]
             attempts.append(now)
             r.setex(key, window, json.dumps(attempts))
         else:
             with _login_lock:
-                store.setdefault(key, []).append(now)
+                attempts = [t for t in store.get(key, []) if now - t < window]
+                attempts.append(now)
+                store[key] = attempts
 
     _store(f"login_attempts:{ip}", _login_attempts)
     if username:
@@ -146,8 +155,7 @@ class LoginRequest(BaseModel):
 
 
 class LoginResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
+    # access_token 不再返回响应体（浏览器走 httponly cookie，API 客户端需独立获取）
     user: dict
 
 
@@ -188,6 +196,9 @@ def login(req: LoginRequest, request: Request, response: Response, db: Session =
 
     _clear_login_attempts(client_ip, req.username)
 
+    user.last_login_at = func.now()
+    db.commit()
+
     token = create_access_token(data={"sub": user.username})
     # 同时设置 httponly cookie，前端 axios withCredentials 可自动携带
     response.set_cookie(
@@ -201,7 +212,6 @@ def login(req: LoginRequest, request: Request, response: Response, db: Session =
     # 设置 CSRF token cookie（非 httponly，供前端读取）
     csrf_token = _set_csrf_cookie(response)
     return LoginResponse(
-        access_token=token,
         user={
             "id": user.id,
             "username": user.username,
@@ -223,8 +233,8 @@ def logout(response: Response, request: Request):
     if token:
         from app.core.security import add_to_blacklist
         add_to_blacklist(token)
-    response.delete_cookie(_COOKIE_NAME, httponly=True, samesite="lax")
-    response.delete_cookie("csrf_token", samesite="strict")
+    response.delete_cookie(_COOKIE_NAME, path="/", httponly=True, samesite="lax")
+    response.delete_cookie("csrf_token", path="/", samesite="strict")
     return {"ok": True}
 
 
@@ -417,7 +427,7 @@ async def oauth_callback(
     token = create_access_token(data={"sub": user.username})
     # token 放在 hash fragment，不会出现在服务器日志和 Referer 头中
     # 同时设置 httponly cookie，后续请求可自动携带
-    response = RedirectResponse(f"/oauth-callback#token={token}")
+    response = RedirectResponse("/oauth-callback#status=ok")
     response.set_cookie(
         key=_COOKIE_NAME,
         value=token,
@@ -428,5 +438,5 @@ async def oauth_callback(
     )
     # 设置 CSRF token cookie
     _set_csrf_cookie(response)
-    response.delete_cookie("oauth_state", httponly=True, samesite="lax")
+    response.delete_cookie("oauth_state", path="/", httponly=True, samesite="lax")
     return response

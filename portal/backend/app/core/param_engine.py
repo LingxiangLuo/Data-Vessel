@@ -160,11 +160,15 @@ def build_param_context(
         ctx[key] = _resolve_date_format(fmt, now)
 
     # 2. 按顺序解析自定义参数
+    seen_keys = set()
     for p in param_defs or []:
         key = p.get("key", "").strip()
         raw_value = p.get("value", "")
         if not key:
             continue
+        if key in seen_keys:
+            raise ValueError(f"参数定义中存在重复 key: {key}")
+        seen_keys.add(key)
         resolved = substitute(str(raw_value), ctx, biz, now)
         ctx[key] = resolved
 

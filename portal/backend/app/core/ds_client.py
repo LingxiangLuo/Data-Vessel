@@ -88,8 +88,11 @@ class DSClient:
         try:
             resp = await (await self._get_client()).request(method, url, cookies=cookies, **kwargs)
             result = resp.json()
-            # 401 重认证
-            if result.get("code") in (300, 190001) and retry:
+            # 401 重认证（覆盖更多认证失败场景）
+            code = result.get("code")
+            msg = (result.get("msg") or "").lower()
+            is_auth_error = code in (300, 190001, 10001, 10002) or any(k in msg for k in ("session", "login", "unauthorized", "认证", "登录"))
+            if is_auth_error and retry:
                 self._session_id = None
                 async with self._session_lock:
                     # 双重检查：等待锁期间可能已有其他协程续期成功
