@@ -31,7 +31,7 @@
 
 **版本（version）**：每次发布自动递增。Component 有独立版本控制，修改后不会自动同步到引用它的 Workflow。
 
-**Worker 组路由**：`worker_group` 字段（`default` | `sync-worker` | `sql-worker`），控制任务在哪个 Worker 节点上执行。
+**Worker 组路由**：`worker_group` 字段（`default` | `sync-worker` | `sql-worker`），控制任务在哪个 Worker 节点上执行。**字段尚未添加** ⏳
 
 ### Workflow（工作流）
 
@@ -45,13 +45,19 @@
 
 **调度状态（schedule_status）**：`ONLINE` / `OFFLINE`。控制 DolphinScheduler 的定时调度开关，与 `status` 是两回事。`status=online` 表示已发布到 DS 可执行；`schedule_status=ONLINE` 表示定时调度已开启。
 
-**最大运行时间**：`max_running_time`（分钟），0 = 默认 24h（不配置时的兜底值）。
+**最大运行时间**：`max_running_time`（分钟），0 = 默认 24h（不配置时的兜底值）。**字段尚未添加** ⏳
+
+**跳过日期**：`skip_dates`（JSON 数组，如 `["2024-01-01", "2024-01-02"]`），需要跳过的业务日期。**字段尚未添加** ⏳
+
+**生效日期**：`effective_start_date` / `effective_end_date`，调度有效期范围。**字段尚未添加** ⏳
+
+**标签**：`tags`（JSON 数组），用于工作流列表筛选。**字段尚未添加** ⏳
 
 ### DataSource（数据源）
 
 统一的数据库连接实体。不分"来源库"/"目标库"类型，所有场景共用同一张表。用户创建后，由 Component（SQL/DataX）和 DQC Rule 引用。
 
-**测试库配置**：支持 `test_connection_info` 字段（或 `test_datasource_id` 外键），测试运行时 DSL 翻译层将数据源替换为测试库连接。
+**测试库配置**：支持 `test_connection_info` 字段（或 `test_datasource_id` 外键指向另一 DataSource），测试运行时 DSL 翻译层将数据源替换为测试库连接。**字段尚未添加，替换逻辑尚未实现** ⏳
 
 ### Publish（发布）
 
@@ -72,7 +78,7 @@ Portal 内部模型到 DS 原生格式的翻译层。
 
 **两种时间基准**：
 - **`${...}`** — 基于**业务日期**（T-1，数据的日期），精度为天。支持年/月/周/天偏移。`${yyyymmdd}` 等价于 `$bizdate`。
-- **`$[...]`** — 基于**定时时间**（T，任务运行的日期），精度为秒。支持天/小时/分钟偏移。`$[yyyymmddhh24miss]` 等价于 `$cyctime`。
+- **`$[...]`** — 基于**定时时间**（T，任务运行的日期），精度为秒。支持天/小时/分钟偏移。`$[yyyymmddhh24miss]` 等价于 `$cyctime`。**二期实现** ⏳
 
 **系统内置参数**：
 - `$bizdate` — 业务日期，`yyyymmdd` 格式
@@ -116,12 +122,38 @@ Portal 内部模型到 DS 原生格式的翻译层。
 ### DS 版本与部署策略
 
 - **目标版本**：DolphinScheduler 3.4.1（从 3.2.2 升级）
-- **升级驱动力**：稳定性修复 + 新功能（更完善的 complement API）+ CVE 安全补丁
-- **升级计划**：先在内网测试环境验证（`192.168.1.3`），确认 DS 数据迁移脚本无问题后，通知用户安排停机窗口执行升级。Portal 代码保持兼容（不依赖 3.4.1 特有 API）
+- **升级驱动力**：稳定性修复 + 更完善的 complement API + CVE 安全补丁
+- **升级计划**：先在内网测试环境验证（`192.168.1.3`），确认 DS 数据迁移脚本无问题后，通知用户安排停机窗口执行升级
 - **部署模式**：支持单机（standalone）和集群两种模式，由用户选择
 - **注册中心**：PostgreSQL JDBC 模式（`registry.type=jdbc`），替代 ZooKeeper
 - **元数据存储**：PostgreSQL（与 Portal 共用实例，独立 database）
 - **单一 DS 实例**：不存在多 DS 集群场景
+
+### DS 3.4.1 与 3.2.2 的关键差异（影响 Portal 设计）
+
+**1. 补数据架构重构**
+- API 层与 Master 层通过 RPC（`IWorkflowControlClient`）分离，补数据请求从 API 同步调用 Master
+- `complementDependentMode=ALL_DEPENDENT` 在 3.4.1 中为空实现（`// todo`），**Portal 跨 Workflow 补数据必须完全自研**
+- 补数据时间参数 `scheduleTime` 支持两种格式：日期范围 JSON（`complementStartDate`/`complementEndDate`）或手动列表（`complementScheduleDateList`）
+- Portal 建议使用手动列表模式，精确控制日期
+
+**2. Workflow 状态精简**
+- 3.2.2 的 `ExecutionStatus`（26 种）→ 3.4.1 的 `WorkflowExecutionStatus`（10 种）
+- 新增中间状态：`READY_PAUSE`、`READY_STOP`、`SERIAL_WAIT`、`FAILOVER`
+- 每个状态显式声明 `finalState`/`needFailover` 等元属性
+
+**3. HTTP Alert payload 格式**
+- Alert 消息体是 `WorkflowAlertContent` JSON **数组**（`[{...}, {...}]`）
+- 包含字段：`workflowInstanceId`、`workflowDefinitionCode`、`workflowExecutionStatus`、`commandType`、`workflowStartTime` 等
+- 故障转移告警还包含 `taskCode`、`taskName`、`retryTimes` 等任务级字段
+
+**4. WorkerGroup 增强**
+- 新增项目级 WorkerGroup 绑定（`POST /projects/{code}/worker-group`）
+- 新增 `WorkerGroupChangeNotifier` 支持动态变更通知
+
+**5. 调用方式变化**
+- 补数据/暂停/停止/重跑等操作通过 RPC 同步调用，不再依赖数据库 Command 表异步触发
+- Portal 调用时需设置合理超时（建议 30s），并通过返回的 `workflowInstanceId` 查询后续状态保证幂等
 
 ### 数据库存储架构
 
@@ -137,8 +169,10 @@ Portal **只通过 REST API 与 DS 交互**，不直接读写 DS 数据库表。
 **命令方向（Portal → DS）**：`DSClient` 通过 REST API 直接调用 DS，完成 ProcessDefinition/Schedule 的创建、更新、上线、下线、启动实例、补数据等操作。
 
 **事件方向（DS → Portal）**：采用「DS HTTP Alert Plugin 推送 + Portal 轮询兜底」的双轨方案。
-- **实时推送**：DS 任务实例状态变更时，通过 HTTP Alert 回调 `POST /api/ds/alerts`
-- **兜底轮询**：`instance_sync_scheduler.py` 每 30-60 秒拉取 DS 实例状态，校准本地数据
+- **实时推送**：DS 任务实例状态变更时，通过 HTTP Alert 回调 `POST /api/notifications/ds-webhook`
+  - **Payload 格式**：`WorkflowAlertContent` JSON 数组，包含 `workflowInstanceId`、`workflowExecutionStatus`、`commandType`、`workflowStartTime` 等
+  - **触发时机**：Workflow 进入终态（SUCCESS/FAILURE/STOP）、Worker 故障转移、任务超时
+- **兜底轮询**：`instance_sync_scheduler.py` 每 30-60 秒拉取 DS `/process-instances`，校准本地数据（**尚未实现**）
 - **目标**：Portal 内展示最近运行记录、状态、日志、支持重跑，无需跳转 DS 界面
 
 ---
@@ -156,8 +190,8 @@ Portal **只通过 REST API 与 DS 交互**，不直接读写 DS 数据库表。
 
 ### 测试运行隔离
 
-- 每个 `DataSource` 配置 `test_connection_info`（或 `test_datasource_id` 外键）
-- 测试运行时，DSL 翻译层将数据源替换为测试库连接
+- 每个 `DataSource` 配置 `test_connection_info`（或 `test_datasource_id` 外键）— **字段尚未添加**
+- 测试运行时，DSL 翻译层将数据源替换为测试库连接 — **替换逻辑尚未实现**
 - 测试库表结构由用户自行维护（需与生产一致）
 - 测试实例不参与成功率统计，保留 7 天后自动清理
 
@@ -177,6 +211,40 @@ Portal **只通过 REST API 与 DS 交互**，不直接读写 DS 数据库表。
   - **可选 2**：按天并行链条（每天 A→B→C 串行，不同天并行）
   - **不提供**：全并行（会导致下游读到上游未完成的脏数据）
 
+### 补数据 UI 设计
+
+**触发入口**：
+1. 实例管理列表页顶部「补数据」按钮（选择 Workflow 后可用）
+2. Workflow 详情页/编辑器内「补数据」按钮
+
+**BackfillModal 组件**：
+
+**步骤 1 — 选择日期**：
+- 日期范围选择器（开始日期 ~ 结束日期），默认最近 7 天
+- 支持「排除周末」快捷选项
+- 限制：最近 7 天（可配置）
+
+**步骤 2 — 选择下游范围**：
+- 仅当前 Workflow（默认）
+- 包含直接下游（1 层）— Phase 1
+- 包含全部下游 — Phase 2
+- 实时显示下游 Workflow 列表和数量，超过 20 个时阻止选择并提示
+
+**步骤 3 — 执行策略**：
+- Workflow 间串行 + Workflow 内并行（默认，均衡模式）
+- 全串行
+- 按天并行链条
+
+**步骤 4 — 参数确认**：
+- 展示自动生成的业务日期范围
+- 允许覆盖全局参数（如 `$bizdate` 相关）
+- 显示预估生成的实例数量
+
+**提交后**：
+- 生成唯一的 `backfill_chain_id`
+- 跳转到实例管理页，自动筛选该 `backfill_chain_id`
+- 显示进度条（实时轮询各 Workflow 的 complement 状态）
+
 ### 业务日期规则
 
 | trigger_type | biz_date 规则 |
@@ -195,8 +263,34 @@ Portal **只通过 REST API 与 DS 交互**，不直接读写 DS 数据库表。
 通过 SQLGlot 解析 SQL 组件，提取字段级的 source → transform → target 关系。
 
 **表结构**：
-- `lineage_node` — 字段级血缘节点（component_id, db_name, table_name, column_name, node_type, transform_logic）
-- `lineage_edge` — 字段级血缘边（from_node_id, to_node_id, transform_type, confidence, is_manual）
+
+```sql
+CREATE TABLE lineage_node (
+    id              SERIAL PRIMARY KEY,
+    component_id    INT NOT NULL REFERENCES component(id),
+    db_name         VARCHAR(128),
+    table_name      VARCHAR(128) NOT NULL,
+    column_name     VARCHAR(128) NOT NULL,
+    node_type       VARCHAR(50) NOT NULL,   -- source / transform / target
+    transform_logic TEXT,                   -- 转换逻辑（如 SQL 表达式）
+    created_at      TIMESTAMP DEFAULT NOW(),
+    updated_at      TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX idx_ln_component ON lineage_node(component_id);
+CREATE INDEX idx_ln_table ON lineage_node(db_name, table_name);
+
+CREATE TABLE lineage_edge (
+    id              SERIAL PRIMARY KEY,
+    from_node_id    INT NOT NULL REFERENCES lineage_node(id),
+    to_node_id      INT NOT NULL REFERENCES lineage_node(id),
+    transform_type  VARCHAR(50),            -- select / join / aggregate / filter / etc.
+    confidence      DECIMAL(3,2) DEFAULT 1.00, -- 置信度 0.00 ~ 1.00
+    is_manual       BOOLEAN DEFAULT FALSE,  -- 是否人工纠正
+    created_at      TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX idx_le_from ON lineage_edge(from_node_id);
+CREATE INDEX idx_le_to ON lineage_edge(to_node_id);
+```
 
 **触发时机**：
 1. **组件保存时**（主力触发）— 实时解析 SQL，更新血缘
@@ -209,7 +303,23 @@ Portal **只通过 REST API 与 DS 交互**，不直接读写 DS 数据库表。
 通过表级血缘自动发现 Workflow 之间的依赖关系。
 
 **表结构**：
-- `workflow_dependency` — 跨 Workflow 依赖（upstream_workflow_id, downstream_workflow_id, source_table, target_table, confidence, is_manual）
+
+```sql
+CREATE TABLE workflow_dependency (
+    id                      SERIAL PRIMARY KEY,
+    upstream_workflow_id    INT NOT NULL REFERENCES workflow(id),
+    downstream_workflow_id  INT NOT NULL REFERENCES workflow(id),
+    source_table            VARCHAR(255) NOT NULL,    -- 上游表名
+    target_table            VARCHAR(255) NOT NULL,    -- 下游表名
+    confidence              DECIMAL(3,2) DEFAULT 1.00,
+    is_manual               BOOLEAN DEFAULT FALSE,     -- 人工纠正
+    discovered_at           TIMESTAMP DEFAULT NOW(),   -- 自动发现时间
+    created_at              TIMESTAMP DEFAULT NOW(),
+    UNIQUE(upstream_workflow_id, downstream_workflow_id, source_table, target_table)
+);
+CREATE INDEX idx_wd_upstream ON workflow_dependency(upstream_workflow_id);
+CREATE INDEX idx_wd_downstream ON workflow_dependency(downstream_workflow_id);
+```
 
 **发现方式**：
 - **SQL 组件**：SQLGlot 直接解析，高置信度
@@ -225,11 +335,35 @@ Portal **只通过 REST API 与 DS 交互**，不直接读写 DS 数据库表。
 
 ### HTTP API 增量同步游标
 
-- `http_api_cursor` — 记录 HTTP API 数据集成组件的增量同步游标（component_id, cursor_field, cursor_value, record_count, last_sync_at）
+```sql
+CREATE TABLE http_api_cursor (
+    id              SERIAL PRIMARY KEY,
+    component_id    INT NOT NULL REFERENCES component(id),
+    cursor_field    VARCHAR(128) NOT NULL,  -- 游标字段名
+    cursor_value    VARCHAR(512) NOT NULL,  -- 当前游标值
+    record_count    BIGINT DEFAULT 0,       -- 累计同步记录数
+    last_sync_at    TIMESTAMP,              -- 上次同步时间
+    created_at      TIMESTAMP DEFAULT NOW(),
+    updated_at      TIMESTAMP DEFAULT NOW(),
+    UNIQUE(component_id, cursor_field)
+);
+```
 
 ### 血缘版本快照
 
-- `lineage_snapshot` — 保存血缘历史快照（auto_save / publish / manual），用于历史追溯和变更对比
+```sql
+CREATE TABLE lineage_snapshot (
+    id              SERIAL PRIMARY KEY,
+    workflow_id     INT REFERENCES workflow(id),
+    component_id    INT REFERENCES component(id),
+    snapshot_type   VARCHAR(20) NOT NULL,   -- auto_save / publish / manual
+    snapshot_data   JSONB NOT NULL,         -- 完整的血缘图数据
+    created_by      INT REFERENCES sys_user(id),
+    created_at      TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX idx_ls_workflow ON lineage_snapshot(workflow_id);
+CREATE INDEX ls_component ON lineage_snapshot(component_id);
+```
 
 ---
 
@@ -238,35 +372,103 @@ Portal **只通过 REST API 与 DS 交互**，不直接读写 DS 数据库表。
 ### 表结构
 
 **workflow_instance** — 工作流运行实例（对应 DS ProcessInstance）
-- `workflow_id`, `ds_instance_id`, `ds_process_code`
-- `biz_date`, `trigger_type`, `status`
-- `start_time`, `end_time`, `duration_ms`, `params_json`
-- `complement_id` — DS Complement 批次 ID（补数据时）
-- `backfill_chain_id` — Portal 补数据链条 ID（追踪 A→B→C 补数据链）。跨 Workflow 补数据时，上游实例的 `backfill_chain_id` 透传给下游实例，形成完整追溯链条
-- `last_sync_at`, `is_synced` — 同步元数据
+```sql
+CREATE TABLE workflow_instance (
+    id              SERIAL PRIMARY KEY,
+    workflow_id     INT NOT NULL REFERENCES workflow(id),
+    ds_instance_id  BIGINT,                 -- DS ProcessInstance ID
+    ds_process_code BIGINT NOT NULL,        -- DS ProcessDefinition code
+    biz_date        DATE NOT NULL,          -- 业务日期
+    trigger_type    VARCHAR(20) NOT NULL,   -- schedule / manual / test / backfill
+    status          VARCHAR(20) NOT NULL,   -- submit / waiting / running / pause / kill / success / fail / timeout / skipped
+    start_time      TIMESTAMP,
+    end_time        TIMESTAMP,
+    duration_ms     BIGINT,                 -- 运行时长（毫秒）
+    params_json     JSONB,                  -- 本次运行的实际参数
+    complement_id   BIGINT,                 -- DS Complement 批次 ID（补数据时）
+    backfill_chain_id VARCHAR(64),          -- Portal 补数据链条 ID
+    created_by      INT REFERENCES sys_user(id), -- 触发人（schedule 为 null）
+    is_synced       BOOLEAN DEFAULT FALSE,  -- 是否已与 DS 完成状态同步
+    last_sync_at    TIMESTAMP,              -- 上次同步时间
+    skip_reason     VARCHAR(255),           -- 跳过原因（skip_dates 时）
+    dry_run         BOOLEAN DEFAULT FALSE,  -- 是否空跑实例
+    created_at      TIMESTAMP DEFAULT NOW(),
+    updated_at      TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX idx_wi_workflow_id ON workflow_instance(workflow_id);
+CREATE INDEX idx_wi_status ON workflow_instance(status);
+CREATE INDEX idx_wi_biz_date ON workflow_instance(biz_date);
+CREATE INDEX idx_wi_trigger_type ON workflow_instance(trigger_type);
+CREATE INDEX idx_wi_backfill_chain ON workflow_instance(backfill_chain_id);
+CREATE INDEX idx_wi_ds_instance ON workflow_instance(ds_instance_id);
+```
 
 **task_instance** — 任务运行实例（对应 DS TaskInstance）
-- `workflow_instance_id`, `component_id`, `ds_task_instance_id`, `ds_task_code`
-- `task_name`, `task_type`, `status`, `start_time`, `end_time`, `duration_ms`
-- `log_path`, `log_content`（缓存）, `log_last_line`（增量行号）
-- `worker_host`, `worker_group`
+```sql
+CREATE TABLE task_instance (
+    id                  SERIAL PRIMARY KEY,
+    workflow_instance_id INT NOT NULL REFERENCES workflow_instance(id),
+    component_id        INT REFERENCES component(id),
+    ds_task_instance_id BIGINT,             -- DS TaskInstance ID
+    ds_task_code        BIGINT NOT NULL,    -- DS TaskDefinition code
+    task_name           VARCHAR(255) NOT NULL,
+    task_type           VARCHAR(50) NOT NULL, -- sql / python / shell / datax
+    status              VARCHAR(20) NOT NULL,
+    start_time          TIMESTAMP,
+    end_time            TIMESTAMP,
+    duration_ms         BIGINT,
+    retry_times         INT DEFAULT 0,      -- 重试次数
+    max_retry_times     INT DEFAULT 0,      -- 最大重试次数
+    log_path            VARCHAR(512),
+    log_content         TEXT,               -- 缓存的日志内容（终态时）
+    log_last_line       INT DEFAULT 0,      -- 上次同步到的行号
+    worker_host         VARCHAR(255),
+    worker_group        VARCHAR(100),
+    created_at          TIMESTAMP DEFAULT NOW(),
+    updated_at          TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX idx_ti_workflow_instance ON task_instance(workflow_instance_id);
+CREATE INDEX idx_ti_component ON task_instance(component_id);
+CREATE INDEX idx_ti_status ON task_instance(status);
+CREATE INDEX idx_ti_ds_task ON task_instance(ds_task_instance_id);
+```
 
 ### 状态映射
 
-| DS 状态 | Portal 状态 |
-|---------|-------------|
-| `SUBMITTED_SUCCESS` | `submit` |
-| `RUNNING_EXECUTION` | `running` |
-| `PAUSE` | `pause` |
-| `STOP` | `kill` |
-| `SUCCESS` | `success` |
-| `FAILURE` | `fail` |
-| `NEED_FAULT_TOLERANCE` | `timeout` |
+**Workflow 状态（3.4.1 共 10 种）**：
+
+| DS 状态 | Portal 状态 | 终态 | 说明 |
+|---------|-------------|------|------|
+| `SUBMITTED_SUCCESS` | `submit` | ❌ | 已提交 |
+| `RUNNING_EXECUTION` | `running` | ❌ | 运行中 |
+| `READY_PAUSE` | `pause` | ❌ | 准备暂停（中间态） |
+| `PAUSE` | `pause` | ✅ | 已暂停 |
+| `READY_STOP` | `kill` | ❌ | 准备停止（中间态） |
+| `STOP` | `kill` | ✅ | 已停止 |
+| `FAILURE` | `fail` | ✅ | 失败 |
+| `SUCCESS` | `success` | ✅ | 成功 |
+| `SERIAL_WAIT` | `waiting` | ❌ | 串行等待 |
+| `FAILOVER` | `running` | ❌ | 故障转移中 |
+
+**Task 状态（3.4.1 共 10 种）**：
+
+| DS 状态 | Portal 状态 | 终态 | 说明 |
+|---------|-------------|------|------|
+| `SUBMITTED_SUCCESS` | `submit` | ❌ | 已提交 |
+| `RUNNING_EXECUTION` | `running` | ❌ | 运行中 |
+| `PAUSE` | `pause` | ✅ | 已暂停 |
+| `FAILURE` | `fail` | ✅ | 失败 |
+| `SUCCESS` | `success` | ✅ | 成功 |
+| `NEED_FAULT_TOLERANCE` | `timeout` | ✅ | 超时（容错） |
+| `KILL` | `kill` | ✅ | 被终止 |
+| `DELAY_EXECUTION` | `waiting` | ❌ | 延迟执行 |
+| `FORCED_SUCCESS` | `success` | ✅ | 强制成功 |
+| `DISPATCH` | `submit` | ❌ | 已分发 |
 
 ### 同步机制
 
-1. **实时推送**：DS HTTP Alert → `POST /api/ds/alerts`
-2. **兜底轮询**：`instance_sync_scheduler.py` 每 30-60 秒查询 DS `/process-instances`，对比更新本地状态
+1. **实时推送**：DS HTTP Alert → `POST /api/notifications/ds-webhook`（**代码已存在，模型和调度器尚未实现**）
+2. **兜底轮询**：`instance_sync_scheduler.py` 每 30-60 秒查询 DS `/process-instances`，对比更新本地状态（**尚未实现**）
 3. **日志增量拉取**：通过 `log_last_line` 记录上次同步行号，增量拉取 DS `/log/detail`
 
 ---
@@ -275,12 +477,12 @@ Portal **只通过 REST API 与 DS 交互**，不直接读写 DS 数据库表。
 
 完整优化方案，对标 DataWorks：
 
-- **TTL 降低**：60s（原 300s），心跳保持 45s，崩溃后最多等待 60s 自动释放
+- **TTL 降低**：目标 60s（**代码当前 300s，待重构**），心跳保持 45s，崩溃后最多等待 60s 自动释放
 - **锁状态查询**：显示锁定者用户名、锁定时间、剩余时间
 - **强制解锁**：admin 可释放他人锁，锁所有者也可主动释放
 - **过期提醒**：锁剩余 30s 时前端弹窗提示「点击续期」
 - **申请编辑**：向锁定者发送消息/通知请求释放锁
-- **只读同步**：查看锁定者正在编辑的内容（类似 Google Docs 查看模式）
+- **只读同步**：查看锁定者正在编辑的内容（类似 Google Docs 查看模式）— **开发量较大，建议 Phase 2**
 
 ---
 
@@ -364,6 +566,38 @@ fi
 - **连续失败**：每日发摘要（避免轰炸）
 - **成功恢复**：发送恢复通知
 
+### 告警历史
+
+**表结构**：
+
+```sql
+CREATE TABLE alert_history (
+    id              SERIAL PRIMARY KEY,
+    alert_rule_id   INT REFERENCES alert_rule(id),
+    workflow_id     INT REFERENCES workflow(id),
+    workflow_instance_id INT REFERENCES workflow_instance(id),
+    trigger_type    VARCHAR(50) NOT NULL,   -- failure / timeout / not_triggered
+    status          VARCHAR(20) NOT NULL DEFAULT 'triggered', -- triggered / sent / failed / acknowledged
+    content         TEXT NOT NULL,          -- 告警内容
+    notify_channels JSONB,                  -- 实际使用的通知渠道
+    notify_targets  JSONB,                  -- 实际接收人列表
+    sent_at         TIMESTAMP,              -- 发送时间
+    error_msg       TEXT,                   -- 发送失败原因
+    acknowledged_by INT REFERENCES sys_user(id),
+    acknowledged_at TIMESTAMP,
+    created_at      TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX idx_ah_rule ON alert_history(alert_rule_id);
+CREATE INDEX idx_ah_workflow ON alert_history(workflow_id);
+CREATE INDEX idx_ah_status ON alert_history(status);
+CREATE INDEX idx_ah_created ON alert_history(created_at);
+```
+
+**展示页面**：运维中心「监控报警」子页面「告警历史」Tab
+- 列表字段：触发时间、告警规则、关联 Workflow、触发类型、通知状态、操作（查看详情、标记已处理）
+- 筛选：时间范围、Workflow、触发类型、通知状态
+- 统计：今日告警数、未处理数、按规则分组
+
 ---
 
 ## 状态机
@@ -443,7 +677,24 @@ Admin 通过调整角色权限模板（`sys_role_permission` 表）实现自定�
 **Action 命名规范**：`{resource}.{action}`，如 `instance.rerun`、`workflow.publish`、`instance.set_success`、`workflow.force_unlock`。枚举在后端统一定义，避免前端硬编码。
 
 **表结构**：
-- `audit_log` — user_id, action, target_type, target_id, details(JSON), ip_address, user_agent, created_at
+
+```sql
+CREATE TABLE audit_log (
+    id              SERIAL PRIMARY KEY,
+    user_id         INT REFERENCES sys_user(id),
+    action          VARCHAR(100) NOT NULL,  -- {resource}.{action}
+    target_type     VARCHAR(50) NOT NULL,   -- workflow / component / instance / user / system
+    target_id       VARCHAR(100),           -- 目标对象 ID（可为空）
+    details         JSONB,                  -- 操作详情（旧值/新值、变更字段等）
+    ip_address      VARCHAR(45),
+    user_agent      VARCHAR(512),
+    created_at      TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX idx_al_user ON audit_log(user_id);
+CREATE INDEX idx_al_action ON audit_log(action);
+CREATE INDEX idx_al_target ON audit_log(target_type, target_id);
+CREATE INDEX idx_al_created ON audit_log(created_at);
+```
 
 **查询能力**：按用户、时间范围、操作类型、目标对象筛选
 
@@ -509,10 +760,17 @@ Admin 通过调整角色权限模板（`sys_role_permission` 表）实现自定�
 | `success` | 查看日志、重跑、重跑下游 |
 | `fail` | 查看日志、重跑、重跑下游、置成功 |
 | `timeout` | 查看日志、重跑、重跑下游、置成功 |
-
-**「重跑下游」语义**：仅对该 Workflow 内的 DAG 下游节点生效（DS START_CURRENT_TASK_EXECUTE），非跨 Workflow 的「强制重跑下游」。跨 Workflow 重跑通过血缘系统实现，限制最近 7 天 + 最多 20 个下游 Workflow。
 | `kill` | 查看日志、重跑 |
 | `pause` | 恢复运行、终止运行 |
+
+**操作语义说明**：
+- **重跑**：重新执行该 Workflow 实例（生成新 instance，旧 instance 保留）
+- **重跑下游**：仅对该 Workflow 内 DAG 的下游节点生效（DS `START_CURRENT_TASK_EXECUTE`），非跨 Workflow 的「强制重跑下游」
+- **置成功**：将失败/超时的实例状态强制改为 success，不阻塞下游（DS 不支持，Portal 需本地标记 + 下游依赖放行）
+- **终止运行**：调用 DS kill API，状态变为 `kill`（终态）
+- **取消等待**：对尚未开始的实例，从 DS 队列中移除
+
+**「强制重跑下游」（跨 Workflow）**：通过血缘系统找到所有下游 Workflow，按拓扑排序依次重跑。限制：最近 7 天 + 最多 20 个下游 Workflow。analyst 角色不可执行。
 
 **批量操作**：支持批量重跑、批量置成功、批量终止
 - 限制：仅允许同一 Workflow 且状态兼容的实例批量操作，避免误操作
@@ -527,8 +785,10 @@ Admin 通过调整角色权限模板（`sys_role_permission` 表）实现自定�
 - 支持 `.log` 文件下载
 
 **搜索与高亮**：
-- 前端本地搜索框 + 上一个/下一个导航
+- 前端本地搜索框，支持正则/普通文本搜索，Enter 跳转到下一个匹配
 - 自动错误高亮：包含 `ERROR` / `Exception` / `Traceback` 的行红底显示
+- 日志级别过滤：INFO / WARN / ERROR 三级筛选（通过行首正则匹配，如 `^\d{4}-\d{2}-\d{2}.*\[ERROR\]`）
+- 搜索命中高亮：匹配文本黄色背景
 
 **扩展性**：设计为通用日志组件，预留接口支持后续对接其他组件（如 Airflow、自定义脚本）的日志统一管理
 
@@ -554,6 +814,21 @@ Admin 通过调整角色权限模板（`sys_role_permission` 表）实现自定�
 
 **上下游查看**：DAG 高亮模式切换（全部 / 上游路径 / 下游路径 / 仅当前），不做独立展开面板。
 
+### 运维态 DAG（实例详情页）
+
+编辑态 DAG（Workflow 编辑器）与运维态 DAG（实例详情页）是两套组件：
+
+**编辑态** (`DagCanvas.vue`)：支持增删节点、连线、配置属性。
+**运维态** (`OpsDagView.vue`)：只读展示，带实时状态着色。
+
+**运维态特有功能**：
+- **状态着色**：节点边框/背景按任务状态着色（success 绿 / fail 红 / running 蓝 / waiting 灰）
+- **失败路径高亮**：从根节点到失败节点的整条路径加粗红色显示
+- **右键菜单**（见上表）：查看日志、重跑该节点、置成功、重跑该节点及下游、终止该节点
+- **单击高亮上下游**：单击节点后，非上游/下游的节点置灰，突出显示依赖链路
+- **进度条**：running 状态的节点显示旋转进度指示器
+- **任务统计**：DAG 右上角显示「X 成功 / Y 失败 / Z 运行中」
+
 ### 工作流列表筛选
 
 运维中心首页基础能力。工作流 > 20 个后无筛选无法使用。
@@ -568,6 +843,74 @@ Admin 通过调整角色权限模板（`sys_role_permission` 表）实现自定�
 
 **默认排序**：按最近修改时间倒序
 **支持自定义排序和筛选条件保存**
+
+### 节点级调度属性
+
+每个 DAG 节点（Component 引用）可独立配置以下属性，在 Workflow 编辑器中通过节点右键「属性」设置：
+
+| 属性 | 默认值 | 说明 |
+|------|--------|------|
+| **失败重试次数** | 0 | 失败后自动重试次数（0 = 不重试） |
+| **失败重试间隔** | 1 分钟 | 每次重试的间隔时间 |
+| **超时时间** | 继承 Workflow | 单节点运行超时（分钟），覆盖 Workflow 级别的 `max_running_time` |
+| **出错自动重跑** | 否 | 失败后是否自动重新执行该节点 |
+| **Worker Group** | 继承组件类型默认 | 覆盖该节点的执行 Worker Group |
+| **优先级** | MEDIUM | HIGHEST / HIGH / MEDIUM / LOW / LOWEST |
+
+这些属性通过 DSL 翻译写入 DS TaskDefinition 的 `taskParams` 中。
+
+```sql
+CREATE TABLE workflow_node_config (
+    id                  SERIAL PRIMARY KEY,
+    workflow_id         INT NOT NULL REFERENCES workflow(id),
+    component_id        INT NOT NULL REFERENCES component(id),
+    retry_times         INT DEFAULT 0,
+    retry_interval      INT DEFAULT 60,       -- 秒
+    timeout_minutes     INT,                  -- null = 继承 Workflow
+    auto_rerun_on_fail  BOOLEAN DEFAULT FALSE,
+    worker_group        VARCHAR(100),
+    priority            VARCHAR(20) DEFAULT 'MEDIUM',
+    created_at          TIMESTAMP DEFAULT NOW(),
+    updated_at          TIMESTAMP DEFAULT NOW(),
+    UNIQUE(workflow_id, component_id)
+);
+```
+
+### 工作流版本管理
+
+**版本生成**：每次发布（Publish）Workflow 时，自动递增版本号（`version` 字段 +1），保存当前 DAG、调度配置、节点属性的快照到 `workflow_version` 表。
+
+**版本列表**：Workflow 详情页内嵌「版本历史」Tab，展示：
+- 版本号、发布时间、发布人、变更摘要（自动对比上一版本生成）
+- 支持查看任意版本的历史 DAG（只读）
+- 支持版本间对比（高亮显示 DAG 结构差异、配置变更）
+
+**版本回滚**：选择历史版本 → 恢复到该版本（创建新版本，复制旧版本内容）。回滚后状态为 `draft`，需重新发布才能上线。
+
+```sql
+CREATE TABLE workflow_version (
+    id              SERIAL PRIMARY KEY,
+    workflow_id     INT NOT NULL REFERENCES workflow(id),
+    version         INT NOT NULL,             -- 版本号（从 1 开始递增）
+    dag_json        JSONB NOT NULL,           -- DAG 快照
+    schedule_config JSONB,                   -- 调度配置快照
+    node_configs    JSONB,                   -- 节点属性配置快照（workflow_node_config 聚合）
+    change_summary  TEXT,                    -- 变更摘要（自动生成）
+    published_by    INT REFERENCES sys_user(id),
+    published_at    TIMESTAMP,
+    created_at      TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX idx_wv_workflow ON workflow_version(workflow_id);
+CREATE INDEX idx_wv_version ON workflow_version(workflow_id, version);
+```
+
+### 生效日期
+
+Workflow 调度支持配置生效日期范围：
+- **生效开始日期**：默认创建当日，可选未来日期
+- **生效结束日期**：默认空（永久有效），可设为未来某日期
+
+到达结束日期后，DS Schedule 自动下线（`schedule_status=OFFLINE`），不再生成新实例。在生效日期范围外的 instance 不执行（类似 skip_dates 处理）。
 
 ### 运维概览
 
@@ -592,6 +935,12 @@ Admin 通过调整角色权限模板（`sys_role_permission` 表）实现自定�
 ### 暂不做（Phase 2）
 
 - **数据质量监控页**：DQC 是独立模块，当前 Portal 尚未深度集成。等 DQC 规则数量 > 10 条后再做独立页面
+- **编辑锁只读同步**（Google Docs 模式）：开发量极大，需实时同步编辑器内容，优先级低
+- **调度日历/交易日历**：支持自定义工作日历（排除节假日），影响实例生成逻辑
+- **上下文参数传递**：上下游节点间传递参数（如上游节点输出 → 下游节点输入）
+- **跨周期依赖**：今天实例依赖昨天实例的完成状态，需特殊的依赖检测逻辑
+- **基线破线告警**：DataWorks 智能基线，Portal 不对标
+- **$[...] 定时时间参数语法**：参数引擎二期功能
 
 ---
 
