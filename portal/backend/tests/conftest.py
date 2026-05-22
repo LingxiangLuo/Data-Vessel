@@ -225,6 +225,7 @@ def test_user():
         if existing:
             # Reset password in case a previous test changed it
             existing.password = hash_password("TestPass123")
+            existing.status = 1
             # Ensure RBAC link exists
             dev_role = db.query(SysRole).filter(SysRole.code == "developer").first()
             if dev_role:
